@@ -112,22 +112,17 @@ chart-understanding/
 ## Roadmap phát triển
 
 ### Phase 1: Foundation (Hiện tại)
-- [x] Thiết lập cấu trúc project
-- [ ] Implement preprocessing module
-- [ ] Implement chart detector
-- [ ] Implement basic extraction cho từng loại biểu đồ
+- Thiết lập cấu trúc project
+- Implement preprocessing module
+- Implement chart detector
+- Implement basic extraction cho từng loại biểu đồ
 
 ### Phase 2: ML Integration
-- [ ] Train và tích hợp chart classifier
-- [ ] Implement OCR engine với EasyOCR/Pytesseract
-- [ ] Tích hợp text generation models
+- Train và tích hợp chart classifier
+- Implement OCR engine với EasyOCR/Pytesseract
+- Tích hợp text generation models
 
 ### Phase 3: Enhancement
-- [ ] Cải thiện độ chính xác extraction
-- [ ] Hỗ trợ thêm các loại biểu đồ (scatter, area, etc.)
-- [ ] Tối ưu hóa performance
-
-### Phase 4: Production
-- [ ] Tạo API với FastAPI
-- [ ] Deploy và testing
-- [ ] Documentation hoàn chỉnh
+- Cải thiện độ chính xác extraction
+- Hỗ trợ thêm các loại biểu đồ (scatter, area, etc.)
+- Tối ưu hóa performance
