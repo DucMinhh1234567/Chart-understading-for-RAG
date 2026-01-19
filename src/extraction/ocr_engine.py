@@ -285,10 +285,16 @@ class OCREngine:
                 "xlabel": "",
                 "ylabel": "",
                 "values": [],
+                "y_ticks": [],  # Thêm y-axis ticks để tính scale
             }
 
             # Select OCR method
             read_method = self.read_text_easyocr if ocr_method.lower() == "easyocr" else self.read_text_tesseract
+
+            # Collect candidates for title, xlabel, ylabel (để chọn tốt nhất)
+            title_candidates: list[dict] = []
+            xlabel_candidates: list[dict] = []
+            ylabel_candidates: list[dict] = []
 
             # Process each text region
             for bbox in text_regions:
@@ -323,23 +329,51 @@ class OCREngine:
                         continue
 
                     # Classify region based on position
-                    # Title: near top (y < 0.2 * height)
-                    if center_y < 0.2:
-                        if not result["title"]:
-                            result["title"] = combined_text
-                        else:
-                            # If multiple title candidates, keep the first one
+                    # Title: near top (y < 0.25 * height), ưu tiên text lớn hơn
+                    if center_y < 0.25:
+                        title_candidates.append({
+                            "text": combined_text,
+                            "y": y,
+                            "height": region_h,
+                            "width": region_w,
+                            "center_x": center_x,
+                            "center_y": center_y,
+                        })
+
+                    # X-axis label: bottom region, not too far left (y > 0.85 * height, x > 0.25 * width)
+                    elif center_y > 0.85 and center_x > 0.25:
+                        xlabel_candidates.append({
+                            "text": combined_text,
+                            "y": y,
+                            "center_x": center_x,
+                            "center_y": center_y,
+                        })
+
+                    # Y-axis label: left region, not too far down (x < 0.2 * width, y < 0.75 * height)
+                    elif center_x < 0.2 and center_y < 0.75:
+                        ylabel_candidates.append({
+                            "text": combined_text,
+                            "x": x,
+                            "center_x": center_x,
+                            "center_y": center_y,
+                        })
+
+                    # Y-axis ticks: left region, có thể parse thành số (x < 0.2 * width, y trong khoảng 0.2-0.9)
+                    elif center_x < 0.2 and 0.2 < center_y < 0.9:
+                        # Thử parse thành số
+                        try:
+                            # Loại bỏ các ký tự không phải số, dấu chấm, dấu phẩy
+                            cleaned = combined_text.replace(",", "").replace(" ", "")
+                            if cleaned:
+                                tick_value = float(cleaned)
+                                result["y_ticks"].append({
+                                    "value": tick_value,
+                                    "position": (int(x + region_w / 2), int(y + region_h / 2)),
+                                    "text": combined_text,
+                                })
+                        except (ValueError, AttributeError):
+                            # Không phải số, có thể là ylabel hoặc text khác
                             pass
-
-                    # X-axis label: bottom region, not too far left (y > 0.85 * height, x > 0.3 * width)
-                    elif center_y > 0.85 and center_x > 0.3:
-                        if not result["xlabel"]:
-                            result["xlabel"] = combined_text
-
-                    # Y-axis label: left region, not too far down (x < 0.15 * width, y < 0.7 * height)
-                    elif center_x < 0.15 and center_y < 0.7:
-                        if not result["ylabel"]:
-                            result["ylabel"] = combined_text
 
                     # Values: other regions (typically bar values, tick labels, etc.)
                     else:
@@ -354,6 +388,31 @@ class OCREngine:
                     # Skip region if OCR fails
                     print(f"Warning: Failed to read text from region {bbox}: {exc}")
                     continue
+
+            # Chọn title tốt nhất: ưu tiên text lớn hơn (region height lớn) và ở trên cùng
+            if title_candidates:
+                # Sort theo y (trên cùng) và height (lớn hơn)
+                title_candidates.sort(key=lambda c: (c["y"], -c["height"]))
+                # Lấy title đầu tiên hoặc ghép các title gần nhau
+                selected_titles = [title_candidates[0]]
+                for cand in title_candidates[1:]:
+                    # Nếu title này gần với title đã chọn (cùng hàng), ghép vào
+                    if abs(cand["y"] - selected_titles[0]["y"]) < h * 0.05:
+                        selected_titles.append(cand)
+                result["title"] = " ".join([c["text"] for c in selected_titles]).strip()
+
+            # Chọn xlabel tốt nhất: ưu tiên ở dưới cùng và gần center
+            if xlabel_candidates:
+                xlabel_candidates.sort(key=lambda c: (c["y"], abs(c["center_x"] - 0.5)))
+                result["xlabel"] = xlabel_candidates[0]["text"]
+
+            # Chọn ylabel tốt nhất: ưu tiên ở trái nhất và gần center theo chiều dọc
+            if ylabel_candidates:
+                ylabel_candidates.sort(key=lambda c: (c["x"], abs(c["center_y"] - 0.5)))
+                result["ylabel"] = ylabel_candidates[0]["text"]
+
+            # Sort y_ticks theo vị trí Y (từ trên xuống dưới)
+            result["y_ticks"].sort(key=lambda t: t["position"][1])
 
             return result
 
