@@ -1,420 +1,304 @@
-"""OCR engine wrapper for chart-understanding.
-
-This module provides :class:`OCREngine` for reading text from chart images
-using EasyOCR and Tesseract OCR engines.
-"""
-
-from __future__ import annotations
-
-from typing import TYPE_CHECKING
-
-import numpy as np
+# src/extraction/ocr_engine.py
+import easyocr
+import pytesseract
 from PIL import Image
-
-if TYPE_CHECKING:
-    from collections.abc import Sequence
-
-try:
-    import easyocr
-except ImportError:
-    easyocr = None  # type: ignore[assignment, unused-ignore]
-
-try:
-    import pytesseract
-except ImportError:
-    pytesseract = None  # type: ignore[assignment, unused-ignore]
-
+import numpy as np
 
 class OCREngine:
-    """OCR engine wrapper for reading text from chart images.
-
-    Supports both EasyOCR and Tesseract OCR engines for text extraction
-    from chart components (titles, labels, values).
-
-    Attributes
-    ----------
-    easyocr_reader: easyocr.Reader | None
-        EasyOCR reader instance if EasyOCR is available.
-    languages: list[str]
-        List of language codes for OCR.
-    """
-
-    def __init__(self, languages: Sequence[str] | None = None, gpu: bool = False) -> None:
-        """Initialize the OCR engine.
-
-        Parameters
-        ----------
-        languages:
-            List of language codes (e.g., ['en', 'vi']). Defaults to ['en', 'vi'].
-        gpu:
-            Whether to use GPU for EasyOCR. Default False for compatibility.
-
-        Raises
-        ------
-        ImportError
-            If neither EasyOCR nor pytesseract is installed.
+    def __init__(self, languages=None, gpu=False):
         """
-        self.languages = list(languages) if languages is not None else ["en", "vi"]
-        self.gpu = gpu
-
-        # Initialize EasyOCR if available
-        self.easyocr_reader: easyocr.Reader | None = None
-        if easyocr is not None:
-            try:
-                self.easyocr_reader = easyocr.Reader(self.languages, gpu=gpu)
-            except Exception as exc:
-                # If EasyOCR fails to initialize, continue without it
-                print(f"Warning: Failed to initialize EasyOCR: {exc}")
-                self.easyocr_reader = None
-
-        # Check if at least one OCR engine is available
-        if self.easyocr_reader is None and pytesseract is None:
-            raise ImportError(
-                "At least one OCR engine (EasyOCR or pytesseract) must be installed. "
-                "Install with: pip install easyocr or pip install pytesseract"
-            )
-
-    def read_text_easyocr(
-        self, image_region: np.ndarray, confidence_threshold: float = 0.5
-    ) -> list[dict]:
-        """Read text from image region using EasyOCR.
-
-        Parameters
-        ----------
-        image_region:
-            Image region as numpy array (RGB or grayscale).
-        confidence_threshold:
-            Minimum confidence score to include a text detection (0.0-1.0).
-
-        Returns
-        -------
-        list[dict]
-            List of text detections, each containing:
-            - 'text': Detected text string
-            - 'confidence': Confidence score (0.0-1.0)
-            - 'bbox': Bounding box coordinates [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-
-        Raises
-        ------
-        RuntimeError
-            If EasyOCR is not available or fails to read text.
+        Initialize OCR engines
         """
-        if self.easyocr_reader is None:
-            raise RuntimeError("EasyOCR is not available. Install with: pip install easyocr")
-
-        try:
-            # Ensure image is in correct format (numpy array)
-            if not isinstance(image_region, np.ndarray):
-                raise ValueError("image_region must be a numpy array")
-
-            # EasyOCR expects RGB or grayscale images
-            if image_region.ndim == 3 and image_region.shape[2] == 3:
-                # Already RGB
-                img = image_region
-            elif image_region.ndim == 2:
-                # Grayscale - convert to RGB
-                img = np.stack([image_region] * 3, axis=-1)
+        if languages is None:
+            languages = ['en', 'vi']
+        # EasyOCR - tốt cho tiếng Việt
+        self.easyocr_reader = easyocr.Reader(languages, gpu=gpu)
+        
+        # Tesseract - backup
+        # Cần cài: sudo apt-get install tesseract-ocr tesseract-ocr-vie
+    
+    def read_text_easyocr(self, image_region, confidence_threshold=0.5):
+        """
+        Đọc text từ image region bằng EasyOCR
+        """
+        results = self.easyocr_reader.readtext(image_region)
+        
+        # results format: [([box], text, confidence), ...]
+        texts = []
+        for (bbox, text, conf) in results:
+            if conf > confidence_threshold:
+                texts.append({
+                    'text': text.strip(),
+                    'confidence': conf,
+                    'bbox': bbox
+                })
+        
+        return texts
+    
+    def read_text_tesseract(self, image_region):
+        """
+        Đọc text bằng Tesseract
+        """
+        # Convert numpy array to PIL Image
+        if isinstance(image_region, np.ndarray):
+            image_region = Image.fromarray(image_region)
+        
+        # OCR
+        text = pytesseract.image_to_string(image_region, lang='vie+eng')
+        
+        # Get detailed data
+        data = pytesseract.image_to_data(image_region, lang='vie+eng',
+                                        output_type=pytesseract.Output.DICT)
+        
+        results = []
+        n_boxes = len(data['text'])
+        for i in range(n_boxes):
+            if int(data['conf'][i]) > 50:  # Confidence threshold
+                text = data['text'][i].strip()
+                if text:
+                    results.append({
+                        'text': text,
+                        'confidence': data['conf'][i] / 100,
+                        'bbox': (data['left'][i], data['top'][i],
+                                data['width'][i], data['height'][i])
+                    })
+        
+        return results
+    
+    def read_text_rotated(self, image_region, rotation_angles=[0, 90, 270]):
+        """
+        Đọc text với nhiều góc rotation để bắt được text dọc (y-axis labels)
+        Thử nhiều góc xoay và chọn kết quả tốt nhất
+        
+        Args:
+            image_region: Image region để OCR
+            rotation_angles: Danh sách các góc xoay (0, 90, 270)
+        
+        Returns:
+            List of text results với confidence cao nhất
+        """
+        import cv2
+        
+        best_result = None
+        best_confidence = 0
+        
+        for angle in rotation_angles:
+            # Rotate region
+            if angle == 90:
+                rotated = cv2.rotate(image_region, cv2.ROTATE_90_CLOCKWISE)
+            elif angle == 270:
+                rotated = cv2.rotate(image_region, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            elif angle == 180:
+                rotated = cv2.rotate(image_region, cv2.ROTATE_180)
             else:
-                raise ValueError(f"Unsupported image shape: {image_region.shape}")
-
-            # Read text using EasyOCR
-            results = self.easyocr_reader.readtext(img)
-
-            # Process and filter results
-            detections: list[dict] = []
-            for detection in results:
-                bbox, text, confidence = detection
-
-                # Filter by confidence
-                if confidence < confidence_threshold:
-                    continue
-
-                # Clean and normalize text
-                text_clean = text.strip()
-
-                # Skip empty text
-                if not text_clean:
-                    continue
-
-                detections.append(
-                    {
-                        "text": text_clean,
-                        "confidence": float(confidence),
-                        "bbox": bbox,  # [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-                    }
-                )
-
-            return detections
-
-        except Exception as exc:
-            raise RuntimeError(f"Failed to read text with EasyOCR: {exc}") from exc
-
-    def read_text_tesseract(
-        self, image_region: np.ndarray, lang: str | None = None
-    ) -> list[dict]:
-        """Read text from image region using Tesseract OCR.
-
-        Parameters
-        ----------
-        image_region:
-            Image region as numpy array (RGB or grayscale).
-        lang:
-            Language code (e.g., 'vie+eng'). If None, constructs from self.languages.
-
-        Returns
-        -------
-        list[dict]
-            List of text detections, each containing:
-            - 'text': Detected text string
-            - 'confidence': Confidence score (0.0-100.0, normalized to 0.0-1.0)
-            - 'bbox': Bounding box coordinates [x, y, w, h]
-
-        Raises
-        ------
-        RuntimeError
-            If pytesseract is not available or fails to read text.
+                rotated = image_region
+            
+            # OCR on rotated image
+            texts = self.read_text_easyocr(rotated, confidence_threshold=0.2)
+            
+            if texts and texts[0]['confidence'] > best_confidence:
+                best_confidence = texts[0]['confidence']
+                best_result = texts[0]
+        
+        return [best_result] if best_result else []
+    
+    def _is_number(self, text):
         """
-        if pytesseract is None:
-            raise RuntimeError(
-                "pytesseract is not available. Install with: pip install pytesseract"
-            )
-
-        try:
-            # Ensure image is in correct format
-            if not isinstance(image_region, np.ndarray):
-                raise ValueError("image_region must be a numpy array")
-
-            # Convert numpy array to PIL Image
-            if image_region.ndim == 3 and image_region.shape[2] == 3:
-                # RGB image
-                pil_image = Image.fromarray(image_region.astype(np.uint8))
-            elif image_region.ndim == 2:
-                # Grayscale image
-                pil_image = Image.fromarray(image_region.astype(np.uint8))
-            else:
-                raise ValueError(f"Unsupported image shape: {image_region.shape}")
-
-            # Construct language code if not provided
-            if lang is None:
-                # Map language codes (e.g., 'vi' -> 'vie', 'en' -> 'eng')
-                lang_map = {"en": "eng", "vi": "vie", "vie": "vie", "eng": "eng"}
-                lang_codes = [lang_map.get(l.lower(), l) for l in self.languages]
-                lang = "+".join(lang_codes)
-
-            # Get detailed data including bounding boxes
-            try:
-                data = pytesseract.image_to_data(pil_image, lang=lang, output_type=pytesseract.Output.DICT)
-            except pytesseract.TesseractNotFoundError:
-                raise RuntimeError(
-                    "Tesseract OCR not found. Please install Tesseract OCR on your system."
-                )
-
-            detections: list[dict] = []
-
-            # Process Tesseract output
-            n_boxes = len(data["text"])
-            for i in range(n_boxes):
-                text = data["text"][i].strip()
-                conf = int(data["conf"][i])
-
-                # Skip empty text or low confidence
-                if not text or conf < 0:
-                    continue
-
-                # Normalize confidence to 0.0-1.0 range
-                confidence = float(conf) / 100.0
-
-                # Get bounding box
-                x = data["left"][i]
-                y = data["top"][i]
-                w = data["width"][i]
-                h = data["height"][i]
-
-                # Convert to format similar to EasyOCR: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-                bbox = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]
-
-                detections.append(
-                    {
-                        "text": text,
-                        "confidence": confidence,
-                        "bbox": bbox,
-                    }
-                )
-
-            return detections
-
-        except Exception as exc:
-            raise RuntimeError(f"Failed to read text with Tesseract: {exc}") from exc
-
-    def read_chart_labels(
-        self,
-        image: np.ndarray,
-        text_regions: Sequence[tuple[int, int, int, int]],
-        ocr_method: str = "easyocr",
-    ) -> dict:
-        """Read and classify chart labels based on text region positions.
-
-        Parameters
-        ----------
-        image:
-            Full chart image (RGB or grayscale).
-        text_regions:
-            List of text region bounding boxes (x, y, w, h) from text detection.
-        ocr_method:
-            OCR method to use: 'easyocr' or 'tesseract'. Defaults to 'easyocr'.
-
-        Returns
-        -------
-        dict
-            Dictionary containing classified labels:
-            - 'title': Detected title text (str)
-            - 'xlabel': Detected X-axis label text (str)
-            - 'ylabel': Detected Y-axis label text (str)
-            - 'values': List of value detections [{'text': str, 'position': (x,y)}, ...]
+        Kiểm tra text có phải là số không
         """
+        # Loại bỏ dấu chấm, dấu phẩy, dấu trừ, dấu phần trăm
+        cleaned = text.replace('.', '').replace(',', '').replace('-', '').replace('%', '').strip()
+        
+        # Kiểm tra có phải số nguyên hoặc số thập phân
         try:
-            # Get image dimensions
-            if image.ndim == 3:
-                h, w = image.shape[:2]
+            float(cleaned)
+            return True
+        except ValueError:
+            # Kiểm tra có phải số với đơn vị (ví dụ: "100%", "50k")
+            if cleaned and cleaned[0].isdigit():
+                return True
+            return False
+    
+    def read_chart_labels(self, image, text_regions, ocr_method='easyocr'):
+        """
+        Đọc các labels trong biểu đồ với improved classification logic
+        Sử dụng heuristics để phân biệt title, labels và ticks
+        """
+        labels = {
+            'title': None,
+            'xlabel': None,
+            'ylabel': None,
+            'legend': [],
+            'values': []
+        }
+        
+        h, w = image.shape[:2]
+        all_texts = []  # Lưu tất cả texts để phân tích
+        
+        # Bước 1: Đọc tất cả texts với confidence threshold thấp hơn
+        for (x, y, box_w, box_h) in text_regions:
+            # Crop region
+            region = image[y:y+box_h, x:x+box_w]
+            
+            # CẢI THIỆN: Tính aspect ratio để detect rotated text (vertical text có height > width)
+            aspect_ratio = box_h / box_w if box_w > 0 else 1.0
+            is_vertical = aspect_ratio > 1.5  # Text dọc nếu height > 1.5 * width
+            
+            # Nếu là vertical text, thử rotate để OCR tốt hơn
+            if is_vertical:
+                texts = self.read_text_rotated(region, rotation_angles=[0, 90, 270])
             else:
-                h, w = image.shape
-
-            # Initialize result dictionary
-            result: dict = {
-                "title": "",
-                "xlabel": "",
-                "ylabel": "",
-                "values": [],
-                "y_ticks": [],  # Thêm y-axis ticks để tính scale
-            }
-
-            # Select OCR method
-            read_method = self.read_text_easyocr if ocr_method.lower() == "easyocr" else self.read_text_tesseract
-
-            # Collect candidates for title, xlabel, ylabel (để chọn tốt nhất)
-            title_candidates: list[dict] = []
-            xlabel_candidates: list[dict] = []
-            ylabel_candidates: list[dict] = []
-
-            # Process each text region
-            for bbox in text_regions:
-                x, y, region_w, region_h = bbox
-
-                # Extract region of interest
-                if image.ndim == 3:
-                    roi = image[y : y + region_h, x : x + region_w]
-                else:
-                    roi = image[y : y + region_h, x : x + region_w]
-
-                # Skip empty regions
-                if roi.size == 0:
-                    continue
-
-                # Calculate region center position (normalized 0-1)
-                center_x = (x + region_w / 2) / w
-                center_y = (y + region_h / 2) / h
-
-                try:
-                    # Read text from region
-                    detections = read_method(roi)
-
-                    if len(detections) == 0:
-                        continue
-
-                    # Combine all text in region
-                    texts = [d["text"] for d in detections]
-                    combined_text = " ".join(texts).strip()
-
-                    if not combined_text:
-                        continue
-
-                    # Classify region based on position
-                    # Title: near top (y < 0.25 * height), ưu tiên text lớn hơn
-                    if center_y < 0.25:
-                        title_candidates.append({
-                            "text": combined_text,
-                            "y": y,
-                            "height": region_h,
-                            "width": region_w,
-                            "center_x": center_x,
-                            "center_y": center_y,
-                        })
-
-                    # X-axis label: bottom region, not too far left (y > 0.85 * height, x > 0.25 * width)
-                    elif center_y > 0.85 and center_x > 0.25:
-                        xlabel_candidates.append({
-                            "text": combined_text,
-                            "y": y,
-                            "center_x": center_x,
-                            "center_y": center_y,
-                        })
-
-                    # Y-axis label: left region, not too far down (x < 0.2 * width, y < 0.75 * height)
-                    elif center_x < 0.2 and center_y < 0.75:
-                        ylabel_candidates.append({
-                            "text": combined_text,
-                            "x": x,
-                            "center_x": center_x,
-                            "center_y": center_y,
-                        })
-
-                    # Y-axis ticks: left region, có thể parse thành số (x < 0.2 * width, y trong khoảng 0.2-0.9)
-                    elif center_x < 0.2 and 0.2 < center_y < 0.9:
-                        # Thử parse thành số
-                        try:
-                            # Loại bỏ các ký tự không phải số, dấu chấm, dấu phẩy
-                            cleaned = combined_text.replace(",", "").replace(" ", "")
-                            if cleaned:
-                                tick_value = float(cleaned)
-                                result["y_ticks"].append({
-                                    "value": tick_value,
-                                    "position": (int(x + region_w / 2), int(y + region_h / 2)),
-                                    "text": combined_text,
-                                })
-                        except (ValueError, AttributeError):
-                            # Không phải số, có thể là ylabel hoặc text khác
-                            pass
-
-                    # Values: other regions (typically bar values, tick labels, etc.)
-                    else:
-                        result["values"].append(
-                            {
-                                "text": combined_text,
-                                "position": (int(x + region_w / 2), int(y + region_h / 2)),
-                            }
-                        )
-
-                except Exception as exc:
-                    # Skip region if OCR fails
-                    print(f"Warning: Failed to read text from region {bbox}: {exc}")
-                    continue
-
-            # Chọn title tốt nhất: ưu tiên text lớn hơn (region height lớn) và ở trên cùng
-            if title_candidates:
-                # Sort theo y (trên cùng) và height (lớn hơn)
-                title_candidates.sort(key=lambda c: (c["y"], -c["height"]))
-                # Lấy title đầu tiên hoặc ghép các title gần nhau
-                selected_titles = [title_candidates[0]]
-                for cand in title_candidates[1:]:
-                    # Nếu title này gần với title đã chọn (cùng hàng), ghép vào
-                    if abs(cand["y"] - selected_titles[0]["y"]) < h * 0.05:
-                        selected_titles.append(cand)
-                result["title"] = " ".join([c["text"] for c in selected_titles]).strip()
-
-            # Chọn xlabel tốt nhất: ưu tiên ở dưới cùng và gần center
-            if xlabel_candidates:
-                xlabel_candidates.sort(key=lambda c: (c["y"], abs(c["center_x"] - 0.5)))
-                result["xlabel"] = xlabel_candidates[0]["text"]
-
-            # Chọn ylabel tốt nhất: ưu tiên ở trái nhất và gần center theo chiều dọc
-            if ylabel_candidates:
-                ylabel_candidates.sort(key=lambda c: (c["x"], abs(c["center_y"] - 0.5)))
-                result["ylabel"] = ylabel_candidates[0]["text"]
-
-            # Sort y_ticks theo vị trí Y (từ trên xuống dưới)
-            result["y_ticks"].sort(key=lambda t: t["position"][1])
-
-            return result
-
-        except Exception as exc:
-            raise RuntimeError(f"Failed to read chart labels: {exc}") from exc
+                # OCR với confidence threshold thấp hơn để bắt được nhiều text hơn
+                texts = self.read_text_easyocr(region, confidence_threshold=0.2)
+            
+            if not texts:
+                continue
+            
+            text = texts[0]['text']
+            center_y = y + box_h // 2
+            center_x = x + box_w // 2
+            
+            all_texts.append({
+                'text': text,
+                'position': (center_x, center_y),
+                'bbox': (x, y, box_w, box_h),
+                'length': len(text),
+                'is_number': self._is_number(text),
+                'font_size': box_h,  # Ước tính font size từ height
+                'aspect_ratio': aspect_ratio,
+                'is_vertical': is_vertical  # Flag để identify vertical text (y-axis labels)
+            })
+        
+        # Bước 2: Phân loại với heuristics (CẢI THIỆN)
+        
+        # ========== CẢI THIỆN TITLE EXTRACTION ==========
+        # Tìm tất cả texts ở vùng top (y < 0.3 * h)
+        title_region_texts = [
+            t for t in all_texts 
+            if t['position'][1] < 0.3 * h and not t['is_number']
+        ]
+        
+        if title_region_texts:
+            # CẢI THIỆN: Group texts theo dòng (cùng y level) trước, sau đó sort theo x
+            # Để đảm bảo thứ tự đọc đúng (trái sang phải) - tránh "Sales Monthly" thay vì "Monthly Sales"
+            title_lines = {}  # Group by y position (rounded)
+            
+            for text_info in title_region_texts:
+                y_pos = text_info['position'][1]
+                y_line = round(y_pos / 20) * 20  # Round to nearest 20 pixels (same line)
+                
+                if y_line not in title_lines:
+                    title_lines[y_line] = []
+                title_lines[y_line].append(text_info)
+            
+            # Sort các dòng theo y (từ trên xuống)
+            sorted_lines = sorted(title_lines.items())
+            
+            # Kết hợp texts từ mỗi dòng (sort theo x trong mỗi dòng)
+            title_parts = []
+            for y_line, texts_in_line in sorted_lines:
+                # Sort theo x position (trái sang phải) trong cùng dòng
+                texts_in_line.sort(key=lambda t: t['position'][0])
+                
+                # Kết hợp texts trong cùng dòng
+                line_text = ' '.join([t['text'] for t in texts_in_line])
+                title_parts.append(line_text)
+            
+            if title_parts:
+                # Kết hợp các dòng thành title
+                full_title = ' '.join(title_parts)
+                # Chọn title dài nhất và có font size lớn nhất
+                if not labels['title'] or len(full_title) > len(labels['title']):
+                    labels['title'] = full_title
+            
+            # Fallback: nếu không kết hợp được, chọn text dài nhất
+            if not labels['title'] and title_region_texts:
+                title_region_texts.sort(key=lambda t: (-t['font_size'], -t['length']))
+                labels['title'] = title_region_texts[0]['text']
+        
+        # ========== CẢI THIỆN Y-AXIS LABEL EXTRACTION ==========
+        # Y-axis label thường là text DỌC (rotated 90°) ở bên trái
+        # Ưu tiên tìm text có aspect_ratio > 1.5 (height > width)
+        ylabel_candidates = []
+        
+        for t in all_texts:
+            x_pos, y_pos = t['position']
+            
+            # Vùng bên trái (x < 0.3 * w để bao gồm cả rotated text)
+            if (x_pos < 0.3 * w and 
+                y_pos < 0.85 * h and  # Mở rộng vùng tìm kiếm
+                y_pos > 0.15 * h and  # Không quá gần top
+                not t['is_number'] and
+                t['length'] > 0):  # Cho phép cả text 1 ký tự
+            
+                # CẢI THIỆN: Ưu tiên text dọc (rotated 90°) - đây là y-axis label
+                # Y-axis label thường có height > width (aspect_ratio > 1.5)
+                is_vertical_text = t.get('is_vertical', False) or t.get('aspect_ratio', 1.0) > 1.5
+                
+                # Tính điểm ưu tiên
+                priority_score = 0
+                
+                # Ưu tiên cao cho vertical text (y-axis label thường dọc)
+                if is_vertical_text:
+                    priority_score += 100
+                
+                # Ưu tiên text dài (y-label thường là từ hoặc cụm từ)
+                priority_score += min(t['length'] * 10, 50)
+                
+                # Ưu tiên text ở giữa chiều cao chart (0.3h - 0.6h)
+                y_center_score = 1.0 / (abs(y_pos - 0.45 * h) + 1)
+                priority_score += y_center_score * 20
+                
+                # Ưu tiên text không quá gần top (không phải title)
+                if y_pos > 0.25 * h:
+                    priority_score += 10
+                
+                ylabel_candidates.append({
+                    'text_info': t,
+                    'priority': priority_score,
+                    'is_vertical': is_vertical_text
+                })
+        
+        if ylabel_candidates:
+            # Sort theo priority score
+            ylabel_candidates.sort(key=lambda c: -c['priority'])
+            
+            # Chọn candidate tốt nhất
+            best_candidate = ylabel_candidates[0]
+            best_ylabel = best_candidate['text_info']
+            
+            # Kiểm tra thêm: không phải là category label (thường ở dưới)
+            if best_ylabel['position'][1] < 0.75 * h:
+                labels['ylabel'] = best_ylabel['text']
+        
+        # X-AXIS LABEL: Text ở bottom, không phải số, không phải category
+        xlabel_candidates = [
+            t for t in all_texts
+            if (t['position'][1] > 0.85 * h and
+                t['position'][0] > 0.3 * w and
+                not t['is_number'] and
+                t['length'] > 1)
+        ]
+        if xlabel_candidates:
+            # Chọn text dài nhất, ưu tiên text ở giữa chiều rộng
+            xlabel_candidates.sort(key=lambda t: (
+                -t['length'],
+                abs(t['position'][0] - 0.5 * w)
+            ))
+            labels['xlabel'] = xlabel_candidates[0]['text']
+        
+        # VALUES: Tất cả texts còn lại (có thể là values trên bars, ticks, categories)
+        for t in all_texts:
+            # Bỏ qua các texts đã được classify
+            if (t['text'] == labels.get('title') or
+                t['text'] == labels.get('xlabel') or
+                t['text'] == labels.get('ylabel')):
+                continue
+            
+            labels['values'].append({
+                'text': t['text'],
+                'position': t['position'],
+                'is_number': t['is_number']
+            })
+        
+        return labels

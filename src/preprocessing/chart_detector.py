@@ -1,451 +1,725 @@
-"""Chart component detection for chart-understanding.
-
-This module provides :class:`ChartComponentDetector` for detecting axes, bars,
-colors, and text regions in chart images using computer vision techniques.
+# src/preprocessing/chart_detector.py
 """
+Chart component detection with adaptive configuration and robust error handling.
 
-from __future__ import annotations
-
-from typing import TYPE_CHECKING
-
+This module provides detection for axes, bars, and text regions in chart images
+using computer vision techniques (Hough Transform, connected components, etc.).
+"""
 import cv2
 import numpy as np
+import logging
+from typing import Optional, Tuple, List, Dict
+from scipy.spatial import KDTree
 
-from src.preprocessing.image_utils import ImagePreprocessor
+from .image_utils import ImagePreprocessor
+from .detector_config import (
+    ChartDetectorConfig,
+    ChartDetectionError,
+    InvalidImageError,
+    AxisDetectionError,
+    BarDetectionError
+)
+from .bar_validators import (
+    ValidationPipeline,
+    WidthValidator,
+    AreaValidator,
+    AspectRatioValidator,
+    SpacingValidator
+)
 
-if TYPE_CHECKING:
-    from collections.abc import Sequence
+
+logger = logging.getLogger(__name__)
 
 
 class ChartComponentDetector:
-    """Detects chart components (axes, bars, colors, text) from preprocessed images.
-
-    This class uses a combination of techniques:
-    - Hough Line Transform for axis detection
-    - HSV color space + contours for bar detection
-    - Morphological operations for text region detection
-
-    Attributes
-    ----------
-    preprocessor: ImagePreprocessor
-        Instance used for preprocessing steps if needed.
     """
-
-    def __init__(self, preprocessor: ImagePreprocessor | None = None) -> None:
-        """Initialize the detector.
-
-        Parameters
-        ----------
-        preprocessor:
-            Optional ImagePreprocessor instance. If None, creates a new one.
+    Detects chart components (axes, bars, text regions) in images.
+    
+    Uses adaptive configuration for different image sizes and chart types.
+    Includes comprehensive error handling and validation pipeline.
+    """
+    
+    def __init__(self, preprocessor=None, config: Optional[ChartDetectorConfig] = None):
+        """
+        Initialize detector with optional configuration.
+        
+        Args:
+            preprocessor: Image preprocessor instance
+            config: ChartDetectorConfig for adaptive thresholds
         """
         self.preprocessor = preprocessor or ImagePreprocessor()
-
-    def detect_axes(
-        self, image: np.ndarray
-    ) -> tuple[tuple[int, int, int, int] | None, tuple[int, int, int, int] | None]:
-        """Detect X-axis (bottom horizontal) and Y-axis (left vertical) using Hough Line Transform.
-
-        Steps:
-        1. Convert to grayscale and detect edges
-        2. Apply Hough Line Transform
-        3. Classify lines as horizontal or vertical
-        4. Find bottom-most horizontal line (X-axis)
-        5. Find left-most vertical line (Y-axis)
-
-        Parameters
-        ----------
-        image:
-            Preprocessed RGB image (H, W, 3) or grayscale (H, W).
-
-        Returns
-        -------
-        tuple[tuple | None, tuple | None]
-            (x_axis, y_axis) where each axis is (x1, y1, x2, y2) coordinates,
-            or None if not found.
-
-        Notes
-        -----
-        Uses Probabilistic Hough Line Transform (HoughLinesP) for better
-        performance and more accurate line segments.
+        self.config = config or ChartDetectorConfig()
+        self.logger = logging.getLogger(__name__)
+        self.validation_pipeline = self._create_validation_pipeline()
+        
+        self.logger.info("ChartComponentDetector initialized")
+    
+    def _create_validation_pipeline(self) -> ValidationPipeline:
         """
+        Create validation pipeline with configured validators.
+        
+        Returns:
+            ValidationPipeline instance
+        """
+        validators = [
+            WidthValidator(
+                min_ratio=self.config.width_tolerance_min,
+                max_ratio=self.config.width_tolerance_max
+            ),
+            AreaValidator(
+                min_ratio=self.config.area_tolerance,
+                absolute_min=150
+            ),
+            AspectRatioValidator(
+                min_ratio=self.config.min_aspect_ratio,
+                max_ratio=self.config.max_aspect_ratio
+            ),
+            SpacingValidator(
+                tolerance=self.config.spacing_tolerance
+            )
+        ]
+        return ValidationPipeline(validators)
+    
+    def _validate_image(self, image) -> None:
+        """
+        Validate that image is suitable for processing.
+        
+        Args:
+            image: Input image
+            
+        Raises:
+            InvalidImageError: If image is invalid
+        """
+        if image is None:
+            raise InvalidImageError("Image is None")
+        
+        if not isinstance(image, np.ndarray):
+            raise InvalidImageError(f"Image must be numpy array, got {type(image)}")
+        
+        if len(image.shape) != 3 or image.shape[2] != 3:
+            raise InvalidImageError(
+                f"Image must be RGB with shape (H, W, 3), got shape {image.shape}"
+            )
+        
+        if image.size == 0:
+            raise InvalidImageError("Image has zero size")
+    
+    def detect_axes(self, image) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """
+        Detect X and Y axes using Hough Line Transform with validation.
+        
+        Args:
+            image: RGB image numpy array
+            
+        Returns:
+            Tuple of (x_axis, y_axis) where each is [x1, y1, x2, y2] or None
+            
+        Raises:
+            InvalidImageError: If image is invalid
+            ChartDetectionError: If OpenCV operations fail
+        """
+        # Validate input
+        self._validate_image(image)
+        
+        # Update config with image size
+        h, w = image.shape[:2]
+        self.config.update_image_size(h, w)
+        
+        self.logger.info(f"Detecting axes for image size: {h}x{w}")
+        self.logger.debug(f"Using config: {self.config}")
+        
         try:
-            # Convert to grayscale if needed
-            if image.ndim == 3:
-                gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-            else:
-                gray = image.copy()
-
-            # Detect edges using Canny
-            edges = self.preprocessor.detect_edges(gray)
-
-            # Apply Hough Line Transform (Probabilistic for better results)
+            # Convert to grayscale
+            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+            
+            # Edge detection
+            edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+            
+            # Hough Line Transform with adaptive thresholds
             lines = cv2.HoughLinesP(
                 edges,
                 rho=1,
-                theta=np.pi / 180,
-                threshold=100,
-                minLineLength=50,
-                maxLineGap=10,
+                theta=np.pi/180,
+                threshold=self.config.hough_threshold,
+                minLineLength=self.config.min_line_length,
+                maxLineGap=self.config.max_line_gap
             )
-
-            if lines is None or len(lines) == 0:
-                return None, None
-
-            # Get image dimensions
-            h, w = gray.shape[:2]
-
+            
+            if lines is None:
+                self.logger.warning("No lines detected by Hough transform")
+                return self._fallback_axes(h, w)
+            
+            self.logger.debug(f"Detected {len(lines)} lines")
+            
             # Classify lines into horizontal and vertical
-            horizontal_lines: list[tuple[int, int, int, int]] = []
-            vertical_lines: list[tuple[int, int, int, int]] = []
-
+            h_lines = []
+            v_lines = []
+            
             for line in lines:
                 x1, y1, x2, y2 = line[0]
-
-                # Calculate angle (in degrees)
                 angle = np.abs(np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi)
-
-                # Classify: horizontal if angle < 15 or > 165, vertical if 75 < angle < 105
-                if angle < 15 or angle > 165:
-                    horizontal_lines.append((x1, y1, x2, y2))
-                elif 75 < angle < 105:
-                    vertical_lines.append((x1, y1, x2, y2))
-
-            # Find X-axis (bottom horizontal line)
-            x_axis = self._find_bottom_line(horizontal_lines, h)
-
-            # Find Y-axis (left vertical line)
-            y_axis = self._find_left_line(vertical_lines, w)
-
+                
+                if angle < 10:  # Horizontal (within 10 degrees)
+                    h_lines.append(line[0])
+                elif angle > 80:  # Vertical (within 10 degrees)
+                    v_lines.append(line[0])
+            
+            self.logger.debug(f"Classified: {len(h_lines)} horizontal, {len(v_lines)} vertical")
+            
+            # Find axes with validation
+            x_axis = self._find_bottom_line_validated(h_lines, h, w)
+            y_axis = self._find_left_line_validated(v_lines, h, w)
+            
+            if x_axis is None:
+                self.logger.warning("X-axis not found, using fallback")
+            if y_axis is None:
+                self.logger.warning("Y-axis not found, using fallback")
+            
             return x_axis, y_axis
-
-        except Exception as exc:
-            raise RuntimeError(f"Failed to detect axes: {exc}") from exc
-
-    def detect_bars(
-        self,
-        image: np.ndarray,
-        x_axis: tuple[int, int, int, int] | None = None,
-        y_axis: tuple[int, int, int, int] | None = None,
-        min_area: int = 500,
-        min_aspect_ratio: float = 0.5,
-    ) -> list[dict]:
-        """Detect bar chart bars using HSV color space and contour analysis.
-
-        Steps:
-        1. Convert RGB to HSV
-        2. Create mask to remove white/light background
-        3. Find contours
-        4. Filter contours by area, aspect ratio, and position
-        5. Sort bars left to right
-
-        Parameters
-        ----------
-        image:
-            Preprocessed RGB image (H, W, 3).
-        x_axis:
-            Optional X-axis coordinates (x1, y1, x2, y2). If provided, bars
-            must be above this line.
-        y_axis:
-            Optional Y-axis coordinates (x1, y1, x2, y2). Used for reference.
-        min_area:
-            Minimum contour area in pixels to be considered a bar.
-        min_aspect_ratio:
-            Minimum height/width ratio. Bars should be taller than wide.
-
-        Returns
-        -------
-        list[dict]
-            List of bar dictionaries, each containing:
-            - 'bbox': (x, y, w, h) bounding box
-            - 'contour': contour array
-            - 'area': contour area (float)
-            - 'center': (cx, cy) centroid coordinates
-            Sorted left to right by x-coordinate.
+            
+        except cv2.error as e:
+            self.logger.error(f"OpenCV error in axis detection: {e}")
+            raise ChartDetectionError(f"Axis detection failed: {e}")
+        
+        except Exception as e:
+            self.logger.error(f"Unexpected error in axis detection: {e}", exc_info=True)
+            raise ChartDetectionError(f"Axis detection failed: {e}")
+    
+    def _find_bottom_line_validated(
+        self, 
+        h_lines: List[np.ndarray], 
+        img_height: int,
+        img_width: int
+    ) -> Optional[np.ndarray]:
         """
-        try:
-            if image.ndim != 3 or image.shape[2] != 3:
-                raise ValueError("detect_bars expects an RGB image with shape (H, W, 3).")
-
-            # Convert to HSV for better color-based masking
-            hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
-
-            # Create mask to remove white/light background
-            # Lower and upper bounds for white/light colors in HSV
-            lower_white = np.array([0, 0, 200])
-            upper_white = np.array([180, 30, 255])
-
-            mask = cv2.inRange(hsv, lower_white, upper_white)
-            mask_inv = cv2.bitwise_not(mask)
-
-            # Also remove very dark regions (axes, grid lines)
-            lower_dark = np.array([0, 0, 0])
-            upper_dark = np.array([180, 255, 50])
-            mask_dark = cv2.inRange(hsv, lower_dark, upper_dark)
-            mask_inv = cv2.bitwise_and(mask_inv, cv2.bitwise_not(mask_dark))
-
-            # Apply morphological operations to clean up mask
-            kernel = np.ones((3, 3), np.uint8)
-            mask_inv = cv2.morphologyEx(mask_inv, cv2.MORPH_CLOSE, kernel)
-            mask_inv = cv2.morphologyEx(mask_inv, cv2.MORPH_OPEN, kernel)
-
-            # Find contours
-            contours, _ = cv2.findContours(mask_inv, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-            if len(contours) == 0:
-                return []
-
-            bars: list[dict] = []
-
-            # Get X-axis Y coordinate for filtering
-            x_axis_y: int | None = None
-            if x_axis is not None:
-                # Use the Y coordinate from axis (assuming it's roughly horizontal)
-                x_axis_y = max(x_axis[1], x_axis[3])
-
-            for contour in contours:
-                # Calculate area
-                area = cv2.contourArea(contour)
-
-                if area < min_area:
-                    continue
-
-                # Get bounding box
-                x, y, w, h = cv2.boundingRect(contour)
-
-                # Filter by aspect ratio (height should be greater than width for bars)
-                if h == 0:
-                    continue
-                aspect_ratio = h / max(w, 1)
-
-                if aspect_ratio < min_aspect_ratio:
-                    continue
-
-                # Filter by position: bars should be above X-axis
-                if x_axis_y is not None:
-                    bar_bottom = y + h
-                    # Allow small tolerance (10px) in case of slight misalignment
-                    if bar_bottom > x_axis_y + 10:
-                        continue
-
-                # Calculate centroid
-                M = cv2.moments(contour)
-                if M["m00"] == 0:
-                    continue
-                cx = int(M["m10"] / M["m00"])
-                cy = int(M["m01"] / M["m00"])
-
-                bars.append(
-                    {
-                        "bbox": (x, y, w, h),
-                        "contour": contour,
-                        "area": float(area),
-                        "center": (cx, cy),
-                    }
-                )
-
-            # Sort bars left to right by x-coordinate
-            bars.sort(key=lambda b: b["bbox"][0])
-
+        Find X-axis (bottom horizontal line) with validation.
+        
+        Validates that the line is:
+        - In the bottom 30% of the image
+        - Long enough (>50% of image width)
+        - Nearly horizontal (<5 degrees)
+        
+        Args:
+            h_lines: List of horizontal lines
+            img_height: Image height
+            img_width: Image width
+            
+        Returns:
+            Best X-axis line or None if no valid line found
+        """
+        if not h_lines:
+            return None
+        
+        candidates = []
+        min_y = self.config.axis_position_thresholds['x_axis_min_y_ratio'] * img_height
+        min_length = self.config.axis_length_threshold_ratio * img_width
+        
+        for line in h_lines:
+            x1, y1, x2, y2 = line
+            y_pos = (y1 + y2) / 2
+            length = abs(x2 - x1)
+            
+            # Validation 1: Must be in bottom 30% of image
+            if y_pos < min_y:
+                continue
+            
+            # Validation 2: Must be long enough
+            if length < min_length:
+                continue
+            
+            # Validation 3: Must be nearly horizontal
+            angle = abs(np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi)
+            if angle > 5:
+                continue
+            
+            # Score based on position and length
+            # Prefer lines lower in image and longer
+            position_score = y_pos / img_height
+            length_score = length / img_width
+            total_score = position_score * 0.6 + length_score * 0.4
+            
+            candidates.append({
+                'line': line,
+                'y_pos': y_pos,
+                'length': length,
+                'score': total_score
+            })
+        
+        if not candidates:
+            self.logger.debug(
+                f"No valid X-axis candidates found among {len(h_lines)} horizontal lines"
+            )
+            return None
+        
+        # Return best candidate
+        best = max(candidates, key=lambda c: c['score'])
+        self.logger.debug(
+            f"Found X-axis at y={best['y_pos']:.1f}, length={best['length']:.1f}, "
+            f"score={best['score']:.3f}"
+        )
+        return best['line']
+    
+    def _find_left_line_validated(
+        self, 
+        v_lines: List[np.ndarray], 
+        img_height: int,
+        img_width: int
+    ) -> Optional[np.ndarray]:
+        """
+        Find Y-axis (left vertical line) with validation.
+        
+        Validates that the line is:
+        - In the left 20% of the image
+        - Long enough (>50% of image height)
+        - Nearly vertical (<5 degrees from vertical)
+        
+        Args:
+            v_lines: List of vertical lines
+            img_height: Image height
+            img_width: Image width
+            
+        Returns:
+            Best Y-axis line or None if no valid line found
+        """
+        if not v_lines:
+            return None
+        
+        candidates = []
+        max_x = self.config.axis_position_thresholds['y_axis_max_x_ratio'] * img_width
+        min_length = self.config.axis_length_threshold_ratio * img_height
+        
+        for line in v_lines:
+            x1, y1, x2, y2 = line
+            x_pos = (x1 + x2) / 2
+            length = abs(y2 - y1)
+            
+            # Validation 1: Must be in left 20% of image
+            if x_pos > max_x:
+                continue
+            
+            # Validation 2: Must be long enough
+            if length < min_length:
+                continue
+            
+            # Validation 3: Must be nearly vertical
+            angle = abs(np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi)
+            if angle < 85:  # Less than 85 degrees from horizontal (>5 from vertical)
+                continue
+            
+            # Score based on position and length
+            # Prefer lines further left and longer
+            position_score = 1 - (x_pos / img_width)
+            length_score = length / img_height
+            total_score = position_score * 0.6 + length_score * 0.4
+            
+            candidates.append({
+                'line': line,
+                'x_pos': x_pos,
+                'length': length,
+                'score': total_score
+            })
+        
+        if not candidates:
+            self.logger.debug(
+                f"No valid Y-axis candidates found among {len(v_lines)} vertical lines"
+            )
+            return None
+        
+        # Return best candidate
+        best = max(candidates, key=lambda c: c['score'])
+        self.logger.debug(
+            f"Found Y-axis at x={best['x_pos']:.1f}, length={best['length']:.1f}, "
+            f"score={best['score']:.3f}"
+        )
+        return best['line']
+    
+    def _fallback_axes(self, img_height: int, img_width: int) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """
+        Provide fallback axes when none detected.
+        
+        Uses image boundaries as approximate axes.
+        
+        Args:
+            img_height: Image height
+            img_width: Image width
+            
+        Returns:
+            Tuple of (x_axis, y_axis) using image boundaries
+        """
+        self.logger.warning("Using fallback axes (image boundaries)")
+        
+        # X-axis: bottom edge
+        x_axis = np.array([0, img_height - 1, img_width - 1, img_height - 1])
+        
+        # Y-axis: left edge
+        y_axis = np.array([0, 0, 0, img_height - 1])
+        
+        return x_axis, y_axis
+    
+    def _merge_nearby_bars_optimized(
+        self, 
+        bars: List[Dict], 
+        max_distance: Optional[int] = None
+    ) -> List[Dict]:
+        """
+        Merge nearby bars using KDTree for O(n log n) performance.
+        
+        This replaces the O(n²) nested loop with spatial indexing.
+        
+        Args:
+            bars: List of bar dictionaries
+            max_distance: Maximum distance for merging (uses config if None)
+            
+        Returns:
+            List of merged bars
+        """
+        if not bars or len(bars) < 2:
             return bars
-
-        except Exception as exc:
-            raise RuntimeError(f"Failed to detect bars: {exc}") from exc
-
-    def extract_bar_colors(self, image: np.ndarray, bars: Sequence[dict]) -> list[tuple[int, int, int]]:
-        """Extract average RGB color for each detected bar.
-
-        Parameters
-        ----------
-        image:
-            Original RGB image (H, W, 3).
-        bars:
-            List of bar dictionaries from detect_bars().
-
-        Returns
-        -------
-        list[tuple[int, int, int]]
-            List of RGB color tuples, one per bar, in the same order as input.
-        """
+        
+        if max_distance is None:
+            max_distance = self.config.merge_max_distance
+        
+        self.logger.debug(f"Merging {len(bars)} bars with max_distance={max_distance}")
+        
         try:
-            if image.ndim != 3 or image.shape[2] != 3:
-                raise ValueError("extract_bar_colors expects an RGB image with shape (H, W, 3).")
-
-            colors: list[tuple[int, int, int]] = []
-
-            for bar in bars:
-                x, y, w, h = bar["bbox"]
-
-                # Extract region of interest (ROI)
-                roi = image[y : y + h, x : x + w]
-
-                # Calculate mean color (excluding background/transparent pixels)
-                # Create mask for non-white pixels to avoid background contamination
-                mask = cv2.inRange(roi, (0, 0, 0), (250, 250, 250))
-                mask_inv = cv2.bitwise_not(mask)
-
-                if np.sum(mask_inv) == 0:
-                    # If all pixels are white/background, use mean of entire ROI
-                    mean_color = roi.mean(axis=(0, 1))
-                else:
-                    # Calculate mean only for non-background pixels
-                    mean_color = roi[mask_inv > 0].mean(axis=0)
-
-                # Convert to integers and ensure valid RGB range
-                r = int(np.clip(mean_color[0], 0, 255))
-                g = int(np.clip(mean_color[1], 0, 255))
-                b = int(np.clip(mean_color[2], 0, 255))
-
-                colors.append((r, g, b))
-
-            return colors
-
-        except Exception as exc:
-            raise RuntimeError(f"Failed to extract bar colors: {exc}") from exc
-
-    def detect_text_regions(
-        self,
-        image: np.ndarray,
-        min_aspect_ratio: float = 0.2,
-        max_aspect_ratio: float = 20.0,
-    ) -> list[tuple[int, int, int, int]]:
-        """Detect text regions using morphological operations and contour analysis.
-
-        Steps:
-        1. Convert to grayscale and binarize
-        2. Apply morphological dilation to connect text characters
-        3. Find contours
-        4. Filter by aspect ratio (text regions are typically rectangular)
-
-        Parameters
-        ----------
-        image:
-            Preprocessed RGB image (H, W, 3) or grayscale (H, W).
-        min_aspect_ratio:
-            Minimum width/height or height/width ratio for text regions.
-        max_aspect_ratio:
-            Maximum width/height or height/width ratio for text regions.
-
-        Returns
-        -------
-        list[tuple[int, int, int, int]]
-            List of bounding boxes (x, y, w, h) for detected text regions.
-        """
-        try:
-            # Convert to grayscale if needed
-            if image.ndim == 3:
-                gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-            else:
-                gray = image.copy()
-
-            # Binarize image using Otsu's method
-            _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-
-            # Apply morphological dilation to connect text characters into regions
-            # Horizontal kernel for connecting characters in words
-            kernel_h = np.ones((1, 15), np.uint8)
-            dilated = cv2.dilate(binary, kernel_h, iterations=2)
-
-            # Also try vertical kernel for vertical text
-            kernel_v = np.ones((15, 1), np.uint8)
-            dilated = cv2.dilate(dilated, kernel_v, iterations=1)
-
-            # Find contours
-            contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-            if len(contours) == 0:
-                return []
-
-            text_regions: list[tuple[int, int, int, int]] = []
-
-            for contour in contours:
-                # Get bounding box
-                x, y, w, h = cv2.boundingRect(contour)
-
-                # Filter by aspect ratio
-                if w == 0 or h == 0:
+            # Build KDTree for efficient spatial queries
+            centers = np.array([b['center'] for b in bars])
+            tree = KDTree(centers)
+            
+            merged_bars = []
+            used_indices = set()
+            
+            for i, bar in enumerate(bars):
+                if i in used_indices:
                     continue
-
-                # Calculate aspect ratio (both orientations)
-                aspect_h = w / h  # horizontal text
-                aspect_v = h / w  # vertical text
-
-                # Check if aspect ratio is within acceptable range
-                if (
-                    min_aspect_ratio <= aspect_h <= max_aspect_ratio
-                    or min_aspect_ratio <= aspect_v <= max_aspect_ratio
-                ):
+                
+                # Query nearby bars efficiently - O(log n)
+                indices = tree.query_ball_point(bar['center'], r=max_distance)
+                
+                # Collect bars to merge
+                bars_to_merge = []
+                for idx in indices:
+                    if idx not in used_indices:
+                        # Additional validation: check vertical overlap
+                        x1, y1, w1, h1 = bar['bbox']
+                        x2, y2, w2, h2 = bars[idx]['bbox']
+                        vertical_overlap = max(0, min(y1 + h1, y2 + h2) - max(y1, y2))
+                        
+                        if vertical_overlap > 0.5 * min(h1, h2):
+                            bars_to_merge.append(bars[idx])
+                            used_indices.add(idx)
+                
+                # Merge if multiple bars found
+                if len(bars_to_merge) == 1:
+                    merged_bars.append(bar)
+                else:
+                    merged_bar = self._create_merged_bar(bars_to_merge)
+                    merged_bars.append(merged_bar)
+            
+            self.logger.debug(f"Merged into {len(merged_bars)} bars")
+            return merged_bars
+            
+        except Exception as e:
+            self.logger.warning(f"KDTree merge failed: {e}. Falling back to original method.")
+            return self._merge_nearby_bars_fallback(bars, max_distance)
+    
+    def _create_merged_bar(self, bars_to_merge: List[Dict]) -> Dict:
+        """
+        Create a merged bar from multiple bars.
+        
+        Args:
+            bars_to_merge: List of bars to merge
+            
+        Returns:
+            Merged bar dictionary
+        """
+        all_x = [b['bbox'][0] for b in bars_to_merge]
+        all_y = [b['bbox'][1] for b in bars_to_merge]
+        all_x2 = [b['bbox'][0] + b['bbox'][2] for b in bars_to_merge]
+        all_y2 = [b['bbox'][1] + b['bbox'][3] for b in bars_to_merge]
+        
+        merged_x = min(all_x)
+        merged_y = min(all_y)
+        merged_w = max(all_x2) - merged_x
+        merged_h = max(all_y2) - merged_y
+        
+        return {
+            'bbox': (merged_x, merged_y, merged_w, merged_h),
+            'area': merged_w * merged_h,
+            'center': (merged_x + merged_w // 2, merged_y + merged_h // 2)
+        }
+    
+    def _merge_nearby_bars_fallback(
+        self, 
+        bars: List[Dict], 
+        max_distance: int
+    ) -> List[Dict]:
+        """
+        Fallback O(n²) merge method (original implementation).
+        
+        Used if KDTree method fails.
+        """
+        if not bars:
+            return bars
+        
+        merged_bars = []
+        used_indices = set()
+        
+        for i, bar1 in enumerate(bars):
+            if i in used_indices:
+                continue
+            
+            x1, y1, w1, h1 = bar1['bbox']
+            bars_to_merge = [bar1]
+            used_indices.add(i)
+            
+            for j, bar2 in enumerate(bars):
+                if j <= i or j in used_indices:
+                    continue
+                
+                x2, y2, w2, h2 = bar2['bbox']
+                
+                horizontal_gap = abs((x1 + w1/2) - (x2 + w2/2))
+                vertical_overlap = max(0, min(y1 + h1, y2 + h2) - max(y1, y2))
+                
+                if horizontal_gap < max_distance and vertical_overlap > 0.5 * min(h1, h2):
+                    bars_to_merge.append(bar2)
+                    used_indices.add(j)
+            
+            if len(bars_to_merge) == 1:
+                merged_bars.append(bar1)
+            else:
+                merged_bars.append(self._create_merged_bar(bars_to_merge))
+        
+        return merged_bars
+    
+    def detect_bars(
+        self, 
+        image, 
+        x_axis: Optional[np.ndarray], 
+        y_axis: Optional[np.ndarray]
+    ) -> List[Dict]:
+        """
+        Detect bars using connected components and morphological operations.
+        
+        Uses multi-scale detection, duplicate removal, merging, and validation.
+        
+        Args:
+            image: RGB image numpy array
+            x_axis: X-axis line [x1, y1, x2, y2] or None
+            y_axis: Y-axis line [x1, y1, x2, y2] or None
+            
+        Returns:
+            List of bar dictionaries with 'bbox', 'area', 'center' keys
+            
+        Raises:
+            InvalidImageError: If image is invalid
+            BarDetectionError: If detection fails critically
+        """
+        # Validate input
+        self._validate_image(image)
+        
+        h, w = image.shape[:2]
+        self.logger.info(f"Detecting bars for image size: {h}x{w}")
+        
+        try:
+            # Convert to HSV for color detection
+            hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+            
+            # Create mask for colored regions (non-white)
+            lower_white = np.array(self.config.hsv_lower_white)
+            upper_white = np.array(self.config.hsv_upper_white)
+            mask = cv2.bitwise_not(cv2.inRange(hsv, lower_white, upper_white))
+            
+            # Multi-scale detection
+            bars_all = []
+            x_axis_y = x_axis[1] if x_axis is not None else h - 50
+            
+            self.logger.debug(f"Using kernel sizes: {self.config.kernel_sizes}")
+            
+            for kernel_size in self.config.kernel_sizes:
+                kernel_erode = cv2.getStructuringElement(cv2.MORPH_RECT, kernel_size)
+                eroded = cv2.erode(mask, kernel_erode, iterations=self.config.erode_iterations)
+                
+                kernel_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+                processed_mask = cv2.dilate(
+                    eroded, 
+                    kernel_dilate, 
+                    iterations=self.config.dilate_iterations
+                )
+                
+                num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+                    processed_mask, connectivity=8
+                )
+                
+                # Use adaptive thresholds from config
+                min_area = self.config.min_bar_area
+                min_aspect_ratio = self.config.min_aspect_ratio
+                max_aspect_ratio = self.config.max_aspect_ratio
+                
+                for i in range(1, num_labels):  # Skip label 0 (background)
+                    area = stats[i, cv2.CC_STAT_AREA]
+                    x = stats[i, cv2.CC_STAT_LEFT]
+                    y = stats[i, cv2.CC_STAT_TOP]
+                    w_bar = stats[i, cv2.CC_STAT_WIDTH]
+                    h_bar = stats[i, cv2.CC_STAT_HEIGHT]
+                    
+                    aspect_ratio = h_bar / w_bar if w_bar > 0 else 0
+                    
+                    # Bar must be above x-axis and have reasonable size
+                    if (area > min_area and 
+                        min_aspect_ratio < aspect_ratio < max_aspect_ratio and
+                        y < x_axis_y and
+                        h_bar > self.config.min_bar_height):
+                        
+                        bars_all.append({
+                            'bbox': (x, y, w_bar, h_bar),
+                            'area': area,
+                            'center': (int(centroids[i][0]), int(centroids[i][1]))
+                        })
+            
+            self.logger.debug(f"Detected {len(bars_all)} bars before filtering")
+            
+            # Sort by x position
+            bars_all = sorted(bars_all, key=lambda b: b['bbox'][0])
+            
+            # Remove duplicates
+            bars = self._remove_duplicates(bars_all)
+            self.logger.debug(f"After duplicate removal: {len(bars)} bars")
+            
+            # Sort again after duplicate removal
+            bars = sorted(bars, key=lambda b: b['bbox'][0])
+            
+            # Merge nearby bars
+            bars = self._merge_nearby_bars_optimized(bars)
+            self.logger.debug(f"After merging: {len(bars)} bars")
+            
+            # Validate bars using pipeline
+            bars = self.validation_pipeline.validate(bars)
+            self.logger.info(f"Final bar count after validation: {len(bars)}")
+            
+            return bars
+            
+        except cv2.error as e:
+            self.logger.error(f"OpenCV error in bar detection: {e}")
+            raise BarDetectionError(f"Bar detection failed: {e}")
+        
+        except Exception as e:
+            self.logger.error(f"Unexpected error in bar detection: {e}", exc_info=True)
+            raise BarDetectionError(f"Bar detection failed: {e}")
+    
+    def _remove_duplicates(self, bars: List[Dict]) -> List[Dict]:
+        """
+        Remove duplicate bars based on overlap.
+        
+        Args:
+            bars: List of bars (sorted by x position)
+            
+        Returns:
+            List of unique bars
+        """
+        if not bars:
+            return bars
+        
+        unique_bars = []
+        overlap_threshold = self.config.overlap_threshold
+        
+        for bar in bars:
+            is_duplicate = False
+            x1, y1, w1, h1 = bar['bbox']
+            
+            for existing_bar in unique_bars:
+                x2, y2, w2, h2 = existing_bar['bbox']
+                
+                # Calculate overlap
+                overlap_x = max(0, min(x1 + w1, x2 + w2) - max(x1, x2))
+                overlap_y = max(0, min(y1 + h1, y2 + h2) - max(y1, y2))
+                overlap_area = overlap_x * overlap_y
+                
+                bar_area = w1 * h1
+                existing_area = w2 * h2
+                
+                # Check if overlap exceeds threshold
+                if overlap_area > overlap_threshold * min(bar_area, existing_area):
+                    is_duplicate = True
+                    # Keep bar with larger area
+                    if bar_area > existing_area:
+                        unique_bars.remove(existing_bar)
+                        unique_bars.append(bar)
+                    break
+            
+            if not is_duplicate:
+                unique_bars.append(bar)
+        
+        return unique_bars
+    
+    def extract_bar_colors(self, image, bars: List[Dict]) -> List[Tuple[int, int, int]]:
+        """
+        Extract average color for each bar.
+        
+        Args:
+            image: RGB image numpy array
+            bars: List of bar dictionaries
+            
+        Returns:
+            List of RGB color tuples
+        """
+        colors = []
+        
+        for bar in bars:
+            x, y, w, h = bar['bbox']
+            
+            # Extract bar region
+            bar_region = image[y:y+h, x:x+w]
+            
+            # Calculate average color
+            avg_color = np.mean(bar_region, axis=(0, 1)).astype(int)
+            colors.append(tuple(avg_color))
+        
+        return colors
+    
+    def detect_text_regions(self, image) -> List[Tuple[int, int, int, int]]:
+        """
+        Detect text regions using morphological operations.
+        
+        Args:
+            image: RGB image numpy array
+            
+        Returns:
+            List of (x, y, w, h) tuples for text regions
+        """
+        try:
+            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+            
+            # Threshold
+            _, binary = cv2.threshold(
+                gray, 0, 255, 
+                cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+            )
+            
+            # Dilate to connect text
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            dilated = cv2.dilate(binary, kernel, iterations=2)
+            
+            # Find contours
+            contours, _ = cv2.findContours(
+                dilated, 
+                cv2.RETR_EXTERNAL,
+                cv2.CHAIN_APPROX_SIMPLE
+            )
+            
+            text_regions = []
+            for cnt in contours:
+                x, y, w, h = cv2.boundingRect(cnt)
+                
+                # Filter based on aspect ratio and size
+                aspect_ratio = w / h if h > 0 else 0
+                if 0.2 < aspect_ratio < 20 and w > 10 and h > 10:
                     text_regions.append((x, y, w, h))
-
-            # Sort by position (top to bottom, left to right)
-            text_regions.sort(key=lambda bbox: (bbox[1], bbox[0]))
-
+            
+            self.logger.debug(f"Detected {len(text_regions)} text regions")
             return text_regions
-
-        except Exception as exc:
-            raise RuntimeError(f"Failed to detect text regions: {exc}") from exc
-
-    def _find_bottom_line(
-        self, horizontal_lines: Sequence[tuple[int, int, int, int]], img_height: int
-    ) -> tuple[int, int, int, int] | None:
-        """Find the bottom-most horizontal line (X-axis candidate).
-
-        Parameters
-        ----------
-        horizontal_lines:
-            List of horizontal line coordinates (x1, y1, x2, y2).
-        img_height:
-            Image height in pixels.
-
-        Returns
-        -------
-        tuple[int, int, int, int] | None
-            Bottom-most line coordinates (x1, y1, x2, y2), or None if no lines.
-        """
-        if len(horizontal_lines) == 0:
-            return None
-
-        # Find line with maximum Y coordinate (bottom-most)
-        # Use the average Y of both endpoints
-        bottom_line = max(horizontal_lines, key=lambda line: (line[1] + line[3]) / 2)
-
-        # Only consider lines in the bottom portion of image (lower 40%)
-        bottom_threshold = img_height * 0.6
-        line_y_avg = (bottom_line[1] + bottom_line[3]) / 2
-
-        if line_y_avg < bottom_threshold:
-            return None
-
-        return bottom_line
-
-    def _find_left_line(
-        self, vertical_lines: Sequence[tuple[int, int, int, int]], img_width: int
-    ) -> tuple[int, int, int, int] | None:
-        """Find the left-most vertical line (Y-axis candidate).
-
-        Parameters
-        ----------
-        vertical_lines:
-            List of vertical line coordinates (x1, y1, x2, y2).
-        img_width:
-            Image width in pixels.
-
-        Returns
-        -------
-        tuple[int, int, int, int] | None
-            Left-most line coordinates (x1, y1, x2, y2), or None if no lines.
-        """
-        if len(vertical_lines) == 0:
-            return None
-
-        # Find line with minimum X coordinate (left-most)
-        # Use the average X of both endpoints
-        left_line = min(vertical_lines, key=lambda line: (line[0] + line[2]) / 2)
-
-        # Only consider lines in the left portion of image (left 40%)
-        left_threshold = img_width * 0.4
-        line_x_avg = (left_line[0] + left_line[2]) / 2
-
-        if line_x_avg > left_threshold:
-            return None
-        return left_line
+            
+        except Exception as e:
+            self.logger.error(f"Error detecting text regions: {e}")
+            return []

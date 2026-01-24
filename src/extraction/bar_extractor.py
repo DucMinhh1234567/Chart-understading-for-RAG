@@ -1,248 +1,396 @@
-"""Simplified bar chart extractor used in module 5 tests."""
-
-from __future__ import annotations
-
-from typing import TYPE_CHECKING
-
+# src/extraction/bar_extractor.py
 import cv2
 import numpy as np
 
-from src.extraction.ocr_engine import OCREngine
-from src.preprocessing.chart_detector import ChartComponentDetector
-from src.preprocessing.image_utils import ImagePreprocessor
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from ..preprocessing.chart_detector import ChartComponentDetector
+from .ocr_engine import OCREngine
 
 
 class BarChartExtractor:
-    """Extract structured data from bar chart images.
-
-    This version keeps a simpler implementation but preserves the public
-    interface expected by the module_5 notebook (including the
-    ``ocr_method`` argument).
-    """
-
-    def __init__(
-        self,
-        detector: ChartComponentDetector | None = None,
-        ocr_engine: OCREngine | None = None,
-        preprocessor: ImagePreprocessor | None = None,
-    ) -> None:
-        self.preprocessor = preprocessor or ImagePreprocessor()
-        self.detector = detector or ChartComponentDetector(self.preprocessor)
-        self.ocr = ocr_engine or OCREngine(languages=["en", "vi"], gpu=False)
-
-    def extract(self, image_path: str | Path, ocr_method: str = "easyocr") -> dict:
-        """Main extraction pipeline. Returns structured data.
-
-        Parameters
-        ----------
-        image_path:
-            Path to the bar chart image file.
-        ocr_method:
-            OCR method to use (kept for compatibility). The current
-            implementation forwards this to the OCR engine.
+    def __init__(self):
+        self.detector = ChartComponentDetector()
+        self.ocr = OCREngine()
+    
+    def _is_number(self, text):
+        """
+        Kiểm tra text có phải là số không
+        """
+        cleaned = text.replace('.', '').replace(',', '').replace('-', '').replace('%', '').strip()
+        try:
+            float(cleaned)
+            return True
+        except ValueError:
+            if cleaned and cleaned[0].isdigit():
+                return True
+            return False
+    
+    def _extract_ylabel_from_left_region(self, image):
+        """
+        Crop vùng bên trái và OCR riêng để tìm y-label
+        Đặc biệt hữu ích cho text dọc (rotated 90 degrees)
+        
+        Returns:
+            str: Y-axis label hoặc None
+        """
+        h, w = image.shape[:2]
+        
+        # Crop vùng bên trái (x: 0 -> 0.15*w, y: 0.2*h -> 0.8*h)
+        left_region = image[int(0.2*h):int(0.8*h), 0:int(0.15*w)]
+        
+        # Rotate 90 degrees clockwise để text dọc thành ngang
+        rotated = cv2.rotate(left_region, cv2.ROTATE_90_CLOCKWISE)
+        
+        # OCR với multiple angles
+        results = self.ocr.read_text_easyocr(rotated, confidence_threshold=0.3)
+        
+        if results:
+            # Filter: chỉ lấy text không phải số, dài nhất
+            non_number_texts = [r for r in results if not self._is_number(r['text'])]
+            if non_number_texts:
+                # Sort theo độ dài và confidence
+                non_number_texts.sort(key=lambda t: (-len(t['text']), -t['confidence']))
+                return non_number_texts[0]['text']
+        
+        return None
+    
+    def extract(self, image_path, ocr_method='easyocr'):
+        """
+        Main extraction pipeline
+        Returns structured data
         """
         # Load image
-        image = self.preprocessor.load_image(str(image_path))
-
+        image = cv2.imread(image_path)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        
         # Step 1: Detect components
         x_axis, y_axis = self.detector.detect_axes(image)
         bars = self.detector.detect_bars(image, x_axis, y_axis)
         text_regions = self.detector.detect_text_regions(image)
-
+        
         # Step 2: OCR
         labels = self.ocr.read_chart_labels(image, text_regions, ocr_method=ocr_method)
-
-        # Step 3: Calculate values (sử dụng y_ticks nếu có để tính scale)
-        values = self._calculate_bar_values(bars, y_axis, image.shape[0], labels.get("y_ticks", []))
-
-        # Step 4: Match categories with bars
-        categories = self._extract_categories(labels, bars, image.shape[1], image.shape[0])
-
-        # Step 5: Create structured data
-        structured_data: dict = {
-            "chart_type": "bar_chart",
-            "title": labels.get("title", "Untitled"),
-            "x_axis_label": labels.get("xlabel", "X-axis"),
-            "y_axis_label": labels.get("ylabel", "Y-axis"),
-            "data": [],
-        }
-
-        for i, bar in enumerate(bars):
-            cat = categories[i] if i < len(categories) else f"Category {i+1}"
-            val = values[i] if i < len(values) else 0.0
-
-            structured_data["data"].append(
-                {
-                    "category": cat,
-                    "value": float(val),
-                }
-            )
-
-        return structured_data
-
-    def _calculate_bar_values(self, bars, y_axis, img_height, y_ticks=None):
-        """Tính giá trị của mỗi bar dựa trên chiều cao pixel.
         
-        Nếu có y_ticks, sẽ convert sang giá trị thật theo scale.
-        Nếu không, normalize về 0-100.
-        """
-        if not bars:
-            return []
-
-        if y_ticks is None:
-            y_ticks = []
-
-        # Xác định baseline (X-axis Y coordinate)
-        if not y_axis:
-            # Fallback: dùng bottom của image làm baseline
-            baseline_y = img_height - 50
-        else:
-            # Y-axis là (x1, y1, x2, y2), baseline là Y coordinate của X-axis
-            # Thường là max(y1, y2) hoặc có thể dùng max bottom của bars
-            baseline_y = max((bar["bbox"][1] + bar["bbox"][3]) for bar in bars) if bars else img_height - 50
-
-        # Nếu có y_ticks, tính scale để convert sang giá trị thật
-        scale_info = None
-        if len(y_ticks) >= 2:
-            # Sort theo Y position (từ trên xuống dưới)
-            sorted_ticks = sorted(y_ticks, key=lambda t: t["position"][1])
-            
-            # Lấy tick trên cùng và dưới cùng
-            top_tick = sorted_ticks[0]
-            bottom_tick = sorted_ticks[-1]
-            
-            top_y = top_tick["position"][1]
-            bottom_y = bottom_tick["position"][1]
-            pixel_range = bottom_y - top_y
-            
-            top_value = top_tick["value"]
-            bottom_value = bottom_tick["value"]
-            value_range = bottom_value - top_value
-            
-            if pixel_range > 0 and value_range != 0:
-                scale_info = {
-                    "min": top_value,
-                    "max": bottom_value,
-                    "pixel_min": top_y,
-                    "pixel_max": bottom_y,
-                    "pixel_range": pixel_range,
-                    "value_range": value_range,
-                }
-
-        values: list[float] = []
-
-        for bar in bars:
-            x, y, w, h = bar["bbox"]
-
-            # Bar height in pixels (from baseline to bar top)
-            bar_top = y
-            bar_height_px = max(0.0, float(baseline_y - bar_top))
-
-            # Nếu có scale_info, convert sang giá trị thật
-            if scale_info:
-                # Tính vị trí Y của bar top trong hệ tọa độ của scale
-                # Scale từ top_y (min) đến bottom_y (max)
-                if bar_top < scale_info["pixel_min"]:
-                    # Bar cao hơn top tick
-                    value = scale_info["max"]
-                elif bar_top > scale_info["pixel_max"]:
-                    # Bar thấp hơn bottom tick
-                    value = scale_info["min"]
-                else:
-                    # Linear interpolation
-                    normalized = (scale_info["pixel_max"] - bar_top) / scale_info["pixel_range"]
-                    value = scale_info["min"] + normalized * scale_info["value_range"]
-                values.append(round(value, 2))
-            else:
-                # Không có scale, dùng pixel height
-                values.append(bar_height_px)
-
-        # Nếu không có scale_info, normalize về 0-100
-        if not scale_info:
-            max_height_px = max(values) if values else 1.0
-            if max_height_px <= 0:
-                return [0.0 for _ in values]
-            values = [round((v / max_height_px) * 100.0, 2) for v in values]
-
-        return values
-
-    def _extract_categories(self, labels, bars, img_width, img_height):
-        """Match category labels với bars dựa trên vị trí X."""
-        # Lấy các text ở dưới (x-axis labels)
-        value_texts = labels.get("values", [])
-
-        # Filter: chỉ lấy text ở phía dưới (dùng img_height)
-        bottom_texts = [v for v in value_texts if v["position"][1] > img_height * 0.7]
-
-        # Filter cải thiện: loại bỏ các label không phải category
-        def is_valid_category(text: str) -> bool:
-            """Kiểm tra xem text có phải là category label hợp lệ không."""
-            text = text.strip()
-            if not text or len(text) > 25:  # Quá dài
-                return False
-            
-            # Loại bỏ text có quá nhiều số (thường là tick values hoặc giá trị)
-            words = text.split()
-            num_numbers = sum(1 for word in words if any(c.isdigit() for c in word))
-            if num_numbers > len(words) * 0.5:  # Nếu > 50% là số
-                return False
-            
-            # Loại bỏ text có quá nhiều từ (thường là title hoặc label dài)
-            if len(words) > 4:  # Category thường chỉ 1-3 từ
-                return False
-            
-            # Loại bỏ text chỉ toàn số (là tick value, không phải category)
-            if text.replace(".", "").replace(",", "").replace("-", "").isdigit():
-                return False
-            
-            return True
-
-        cleaned_texts = [v for v in bottom_texts if is_valid_category(v["text"])]
-        if cleaned_texts:
-            bottom_texts = cleaned_texts
-
-        # Sort theo position x
-        bottom_texts = sorted(bottom_texts, key=lambda t: t["position"][0])
-
-        categories: list[str] = []
-        # Tính threshold động dựa trên khoảng cách giữa các bars
-        if len(bars) > 1:
-            bar_centers = [bar["center"][0] for bar in bars]
-            bar_centers.sort()
-            avg_bar_spacing = sum(bar_centers[i+1] - bar_centers[i] for i in range(len(bar_centers)-1)) / (len(bar_centers) - 1)
-            max_distance = max(50.0, avg_bar_spacing * 0.4)  # 40% khoảng cách giữa các bars
-        else:
-            max_distance = max(50.0, img_width * 0.1)  # Fallback: 10% chiều rộng ảnh
-
-        # Track các label đã được sử dụng để tránh duplicate
-        used_labels = set()
-
+        # Step 2.5: Nếu ylabel là None hoặc empty, thử extract riêng từ vùng trái
+        if not labels.get('ylabel') or labels.get('ylabel') == 'None' or labels.get('ylabel') == '':
+            ylabel = self._extract_ylabel_from_left_region(image)
+            if ylabel:
+                labels['ylabel'] = ylabel
+        
+        # Step 3: Calculate values (cải thiện: sử dụng value labels và y-axis scale)
+        values = self._calculate_bar_values(bars, y_axis, image, labels)
+        
+        # Step 4: Match categories with bars (cải thiện: better matching logic)
+        categories = self._extract_categories(labels, bars, image.shape[1], image.shape[0])
+        
+        # Step 5: Create structured data
+        structured_data = {
+            'chart_type': 'bar_chart',
+            'title': labels.get('title', 'Untitled'),
+            'x_axis_label': labels.get('xlabel', 'X-axis'),
+            'y_axis_label': labels.get('ylabel', 'Y-axis'),
+            'data': []
+        }
+        
         for i, bar in enumerate(bars):
-            bar_center_x = bar["center"][0]
-
-            # Tìm text gần bar center nhất và chưa được sử dụng
-            closest_text: str | None = None
-            closest_info = None
-            min_dist = float("inf")
-
-            for text_info in bottom_texts:
-                text_x = text_info["position"][0]
-                dist = abs(text_x - bar_center_x)
-
-                # Chỉ xét label chưa được sử dụng
-                text_key = text_info["text"].strip()
-                if text_key not in used_labels and dist < min_dist:
-                    min_dist = dist
-                    closest_text = text_key
-                    closest_info = text_info
-
-            if closest_text and min_dist < max_distance:
-                categories.append(closest_text)
-                used_labels.add(closest_text)
+            cat = categories[i] if i < len(categories) else f'Category {i+1}'
+            val = values[i] if i < len(values) else 0.0
+            
+            structured_data['data'].append({
+                'category': cat,
+                'value': val
+            })
+        
+        return structured_data
+    
+    def _detect_y_axis_scale(self, image, y_axis, labels):
+        """
+        Detect y-axis scale từ ticks và labels
+        Returns: (y_min, y_max, tick_positions, tick_values)
+        """
+        h, w = image.shape[:2]
+        
+        # Tìm y-axis ticks (các số ở bên trái)
+        y_ticks = []
+        for val_info in labels.get('values', []):
+            x, y = val_info['position']
+            text = val_info['text']
+            
+            # Y-axis ticks ở bên trái (x < 0.2 * w)
+            if x < 0.2 * w and val_info.get('is_number', False):
+                try:
+                    tick_value = float(text.replace(',', '').replace('%', ''))
+                    y_ticks.append({
+                        'value': tick_value,
+                        'y_position': y
+                    })
+                except ValueError:
+                    continue
+        
+        if len(y_ticks) < 2:
+            # Fallback: giả sử scale 0-100
+            return 0, 100, [0, h-50], [0, 100]
+        
+        # Sort theo y position (từ trên xuống - y nhỏ = trên cao)
+        y_ticks.sort(key=lambda t: t['y_position'])
+        
+        # Lấy min và max
+        y_min = min(t['value'] for t in y_ticks)
+        y_max = max(t['value'] for t in y_ticks)
+        
+        # Nếu không có 0, thêm vào
+        if y_min > 0:
+            y_min = 0
+        
+        tick_positions = [t['y_position'] for t in y_ticks]
+        tick_values = [t['value'] for t in y_ticks]
+        
+        return y_min, y_max, tick_positions, tick_values
+    
+    def _extract_bar_values_from_labels(self, bars, labels, image):
+        """
+        Extract values từ labels trên bars (nếu có)
+        CẢI THIỆN: Mở rộng vùng tìm kiếm và threshold linh hoạt hơn
+        """
+        h, w = image.shape[:2]
+        values = []
+        
+        # Lấy các value labels (số ở trên bars)
+        value_labels = [
+            v for v in labels.get('values', [])
+            if v.get('is_number', False)
+        ]
+        
+        for bar in bars:
+            bar_center_x = bar['center'][0]
+            bar_top_y = bar['bbox'][1]  # Top of bar
+            bar_bottom_y = bar['bbox'][1] + bar['bbox'][3]
+            
+            # Tìm value label gần bar nhất
+            closest_label = None
+            min_dist = float('inf')
+            
+            for label_info in value_labels:
+                label_x, label_y = label_info['position']
+                
+                # Mở rộng vùng tìm kiếm
+                x_dist = abs(label_x - bar_center_x)
+                # Label có thể ở trên bar hoặc trong bar (value labels)
+                y_dist = min(
+                    abs(label_y - bar_top_y),  # Trên bar
+                    abs(label_y - (bar_top_y + bar_bottom_y) / 2)  # Giữa bar
+                )
+                
+                # Threshold linh hoạt hơn
+                if x_dist < 50 and y_dist < 80:  # Tăng từ 30, 50
+                    total_dist = x_dist + y_dist * 0.5  # Ưu tiên x distance
+                    if total_dist < min_dist:
+                        min_dist = total_dist
+                        closest_label = label_info
+            
+            if closest_label and min_dist < 60:  # Tăng từ 40
+                # Parse value từ text
+                try:
+                    value_text = closest_label['text'].replace(',', '').replace('%', '').strip()
+                    value = float(value_text)
+                    values.append(round(value, 2))
+                except ValueError:
+                    # Fallback: None để tính từ pixel height
+                    values.append(None)
             else:
-                categories.append(f"Category {i+1}")
-
+                # Fallback: None để tính từ pixel height
+                values.append(None)
+        
+        return values
+    
+    def _calculate_values_from_pixels(self, bars, y_axis, image, labels):
+        """
+        Tính values từ pixel height với y-axis scale detection
+        """
+        h, w = image.shape[:2]
+        
+        # Detect y-axis scale
+        y_min, y_max, tick_positions, tick_values = self._detect_y_axis_scale(
+            image, y_axis, labels
+        )
+        
+        # Xác định baseline (x-axis y position)
+        if y_axis is None:
+            baseline_y = h - 50
+        else:
+            baseline_y = y_axis[1]
+        
+        # Tạo mapping function: pixel y -> value
+        def pixel_to_value(pixel_y):
+            """
+            Convert pixel y position to actual value
+            """
+            # Tìm 2 ticks gần nhất
+            if len(tick_positions) < 2:
+                # Linear interpolation với min/max
+                value_range = y_max - y_min
+                pixel_range = baseline_y - tick_positions[0] if tick_positions else h - 50
+                ratio = (baseline_y - pixel_y) / pixel_range if pixel_range > 0 else 0
+                return y_min + ratio * value_range
+            
+            # Interpolate giữa các ticks
+            for i in range(len(tick_positions) - 1):
+                y1 = tick_positions[i]
+                y2 = tick_positions[i + 1]
+                v1 = tick_values[i]
+                v2 = tick_values[i + 1]
+                
+                if y1 <= pixel_y <= y2:
+                    # Linear interpolation
+                    ratio = (pixel_y - y1) / (y2 - y1) if (y2 - y1) > 0 else 0
+                    return v1 + ratio * (v2 - v1)
+            
+            # Extrapolate nếu ngoài range
+            if pixel_y < tick_positions[0]:
+                # Above top tick
+                y1, y2 = tick_positions[0], tick_positions[1] if len(tick_positions) > 1 else tick_positions[0]
+                v1, v2 = tick_values[0], tick_values[1] if len(tick_values) > 1 else tick_values[0]
+                ratio = (pixel_y - y1) / (y2 - y1) if (y2 - y1) > 0 else 0
+                return v1 + ratio * (v2 - v1)
+            else:
+                # Below bottom tick (shouldn't happen for bars)
+                return y_min
+        
+        values = []
+        for bar in bars:
+            x, y, w_bar, h_bar = bar['bbox']
+            
+            # Bar top position (highest point)
+            bar_top_y = y
+            
+            # Calculate value
+            value = pixel_to_value(bar_top_y)
+            values.append(round(value, 2))
+        
+        return values
+    
+    def _calculate_bar_values(self, bars, y_axis, image, labels):
+        """
+        Tính giá trị bars: ưu tiên value labels, fallback về pixel mapping
+        """
+        # Bước 1: Thử extract từ value labels (chính xác nhất)
+        values_from_labels = self._extract_bar_values_from_labels(bars, labels, image)
+        
+        # Bước 2: Tính từ pixel height (fallback)
+        values_from_pixels = self._calculate_values_from_pixels(bars, y_axis, image, labels)
+        
+        # Kết hợp: ưu tiên values từ labels, dùng pixel cho bars không có label
+        final_values = []
+        for i, bar in enumerate(bars):
+            if i < len(values_from_labels) and values_from_labels[i] is not None:
+                final_values.append(values_from_labels[i])
+            elif i < len(values_from_pixels):
+                final_values.append(values_from_pixels[i])
+            else:
+                final_values.append(0.0)
+        
+        return final_values
+    
+    def _extract_categories(self, labels, bars, img_width, img_height):
+        """
+        Match category labels với bars - CẢI THIỆN với fuzzy matching
+        Filter ra các số và x-axis label, chỉ lấy text categories
+        """
+        from difflib import SequenceMatcher
+        
+        # Lấy tất cả texts ở vùng dưới (x-axis area)
+        all_texts = labels.get('values', [])
+        
+        # Filter: chỉ lấy text ở dưới, không phải số, không phải x-axis label
+        xlabel = labels.get('xlabel', '')
+        category_candidates = []
+        
+        for text_info in all_texts:
+            x, y = text_info['position']
+            text = text_info['text']
+            
+            # Mở rộng vùng tìm kiếm (y > 0.6 * h)
+            # Không phải số (categories thường là text)
+            # Không phải x-axis label
+            if (y > 0.6 * img_height and
+                not text_info.get('is_number', False) and
+                text != xlabel and
+                len(text) > 0):
+                category_candidates.append(text_info)
+        
+        # Sort theo x position (trái sang phải)
+        category_candidates = sorted(category_candidates, key=lambda t: t['position'][0])
+        
+        # ========== CẢI THIỆN: Fuzzy matching với common month abbreviations và OCR errors ==========
+        # Common patterns để sửa lỗi OCR
+        month_patterns = {
+            # Month abbreviations
+            'jan': 'Jan', 'feb': 'Feb', 'mar': 'Mar', 'apr': 'Apr',
+            'may': 'May', 'jun': 'Jun', 'jul': 'Jul', 'aug': 'Aug',
+            'sep': 'Sep', 'oct': 'Oct', 'nov': 'Nov', 'dec': 'Dec',
+            # Common OCR errors for months
+            'jui': 'Jul', 'ju1': 'Jul', 'juI': 'Jul', 'jul1': 'Jul',
+            # Full month names
+            'january': 'Jan', 'february': 'Feb', 'march': 'Mar',
+            'april': 'Apr', 'june': 'Jun', 'july': 'Jul',
+            'august': 'Aug', 'september': 'Sep', 'october': 'Oct',
+            'november': 'Nov', 'december': 'Dec',
+            # Common OCR errors for categories (rotated text)
+            'catl': 'Cat1', 'cat1': 'Cat1', 'cat3': 'Cat3', '[cat4': 'Cat4',
+            'cat4': 'Cat4', 'cat5': 'Cat5', 'cato': 'Cat0', 'cat0': 'Cat0',
+            'cat8l': 'Cat8', 'cat8': 'Cat8', 'cat7': 'Cat7',
+            # Region names OCR errors
+            'eastl': 'East', 'east': 'East', 'westl': 'West', 'west': 'West',
+            'centrall': 'Central', 'central': 'Central',
+            'north': 'North', 'south': 'South',
+            # Product names
+            'producte': 'Products', 'product': 'Product', 'products': 'Products',
+            # Student names
+            'student': 'Student', 'students': 'Students'
+        }
+        
+        def normalize_text(text):
+            """Normalize text để so sánh và sửa lỗi OCR"""
+            text_lower = text.lower().strip()
+            # Thử match với month patterns
+            for pattern, correct in month_patterns.items():
+                if pattern in text_lower or text_lower in pattern:
+                    return correct
+            return text
+        
+        # Match với bars
+        categories = []
+        used_candidates = set()
+        
+        for i, bar in enumerate(bars):
+            bar_center_x = bar['center'][0]
+            
+            # Tìm text gần nhất
+            closest_text = None
+            min_dist = float('inf')
+            closest_idx = -1
+            
+            for idx, text_info in enumerate(category_candidates):
+                if idx in used_candidates:
+                    continue
+                
+                text_x = text_info['position'][0]
+                dist = abs(text_x - bar_center_x)
+                
+                # Dynamic threshold
+                threshold = max(40, img_width / (len(bars) * 2.5)) if len(bars) > 0 else 40
+                
+                if dist < threshold and dist < min_dist:
+                    min_dist = dist
+                    closest_text = text_info
+                    closest_idx = idx
+            
+            if closest_text and min_dist < threshold:
+                # Normalize text để sửa OCR errors
+                normalized = normalize_text(closest_text['text'])
+                categories.append(normalized)
+                used_candidates.add(closest_idx)
+            else:
+                # Fallback: dùng index
+                categories.append(f'Category {i+1}')
+        
         return categories
