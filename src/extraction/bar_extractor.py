@@ -1,19 +1,34 @@
 # src/extraction/bar_extractor.py
+"""Bar chart extraction module."""
+from pathlib import Path
+from typing import Dict, Any, List, Optional, Tuple
+
 import cv2
 import numpy as np
 
 from ..preprocessing.chart_detector import ChartComponentDetector
+from ..preprocessing.detector_config import InvalidImageError
+from ..config import DEFAULT_LAYOUT
 from .ocr_engine import OCREngine
 
 
 class BarChartExtractor:
-    def __init__(self):
-        self.detector = ChartComponentDetector()
-        self.ocr = OCREngine()
+    """Extracts structured data from bar chart images."""
     
-    def _is_number(self, text):
+    def __init__(self) -> None:
+        """Initialize extractor with detector and OCR engine."""
+        self.detector: ChartComponentDetector = ChartComponentDetector()
+        self.ocr: OCREngine = OCREngine()
+    
+    def _is_number(self, text: str) -> bool:
         """
-        Kiểm tra text có phải là số không
+        Check if text represents a number.
+        
+        Args:
+            text: Text to check
+            
+        Returns:
+            True if text is a number, False otherwise
         """
         cleaned = text.replace('.', '').replace(',', '').replace('-', '').replace('%', '').strip()
         try:
@@ -24,24 +39,30 @@ class BarChartExtractor:
                 return True
             return False
     
-    def _extract_ylabel_from_left_region(self, image):
+    def _extract_ylabel_from_left_region(self, image: np.ndarray) -> Optional[str]:
         """
-        Crop vùng bên trái và OCR riêng để tìm y-label
-        Đặc biệt hữu ích cho text dọc (rotated 90 degrees)
+        Crop left region and OCR to find y-axis label.
+        Useful for vertical (rotated 90 degrees) text.
         
+        Args:
+            image: Input image as numpy array (RGB)
+            
         Returns:
-            str: Y-axis label hoặc None
+            Y-axis label string or None if not found
         """
         h, w = image.shape[:2]
         
-        # Crop vùng bên trái (x: 0 -> 0.15*w, y: 0.2*h -> 0.8*h)
-        left_region = image[int(0.2*h):int(0.8*h), 0:int(0.15*w)]
+        # Crop vùng bên trái
+        left_region = image[
+            int(DEFAULT_LAYOUT.LEFT_REGION_MIN_Y * h):int(DEFAULT_LAYOUT.LEFT_REGION_MAX_Y * h),
+            0:int(DEFAULT_LAYOUT.LEFT_REGION_MAX_X * w)
+        ]
         
         # Rotate 90 degrees clockwise để text dọc thành ngang
         rotated = cv2.rotate(left_region, cv2.ROTATE_90_CLOCKWISE)
         
         # OCR với multiple angles
-        results = self.ocr.read_text_easyocr(rotated, confidence_threshold=0.3)
+        results = self.ocr.read_text_easyocr(rotated, confidence_threshold=DEFAULT_LAYOUT.YLABEL_CONFIDENCE)
         
         if results:
             # Filter: chỉ lấy text không phải số, dài nhất
@@ -53,74 +74,107 @@ class BarChartExtractor:
         
         return None
     
-    def extract(self, image_path, ocr_method='easyocr'):
+    def _load_and_validate_image(self, image_path: str) -> np.ndarray:
         """
-        Main extraction pipeline.
+        Load and validate image file.
         
         Args:
-            image_path: Path to chart image file
-            ocr_method: OCR engine to use ('easyocr' or 'tesseract')
-        
+            image_path: Path to image file
+            
         Returns:
-            Dict with chart_type, title, x_axis_label, y_axis_label, data
-        
+            Image as RGB numpy array
+            
         Raises:
             FileNotFoundError: If image file doesn't exist
-            ValueError: If ocr_method is invalid or image format unsupported
+            ValueError: If image format is unsupported
             InvalidImageError: If image cannot be loaded
         """
-        from pathlib import Path
-        from ..preprocessing.detector_config import InvalidImageError
+        path = Path(image_path)
         
         # Validate file exists
-        path = Path(image_path)
         if not path.exists():
             raise FileNotFoundError(f"Image not found: {image_path}")
         
         # Validate image format
-        supported_formats = ['.png', '.jpg', '.jpeg', '.bmp', '.tiff']
-        if path.suffix.lower() not in supported_formats:
+        if path.suffix.lower() not in DEFAULT_LAYOUT.SUPPORTED_IMAGE_FORMATS:
             raise ValueError(
                 f"Unsupported image format: {path.suffix}. "
-                f"Supported: {', '.join(supported_formats)}"
+                f"Supported: {', '.join(DEFAULT_LAYOUT.SUPPORTED_IMAGE_FORMATS)}"
             )
         
-        # Validate ocr_method
-        valid_ocr_methods = ['easyocr', 'tesseract']
-        if ocr_method not in valid_ocr_methods:
-            raise ValueError(
-                f"Invalid OCR method: {ocr_method}. "
-                f"Valid options: {', '.join(valid_ocr_methods)}"
-            )
-        
-        # Load image with error handling
+        # Load image
         image = cv2.imread(str(image_path))
         if image is None:
             raise InvalidImageError(f"Failed to load image: {image_path}")
         
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        # Convert BGR to RGB
+        return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    
+    def _detect_components(
+        self, 
+        image: np.ndarray
+    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], List[Dict[str, Any]], List[Tuple[int, int, int, int]]]:
+        """
+        Detect chart components (axes, bars, text regions).
         
-        # Step 1: Detect components
+        Args:
+            image: Input image as RGB numpy array
+            
+        Returns:
+            Tuple of (x_axis, y_axis, bars, text_regions)
+        """
         x_axis, y_axis = self.detector.detect_axes(image)
         bars = self.detector.detect_bars(image, x_axis, y_axis)
         text_regions = self.detector.detect_text_regions(image)
         
-        # Step 2: OCR
+        return x_axis, y_axis, bars, text_regions
+    
+    def _extract_labels(
+        self, 
+        image: np.ndarray, 
+        text_regions: List[Tuple[int, int, int, int]], 
+        ocr_method: str
+    ) -> Dict[str, Any]:
+        """
+        Extract labels from chart using OCR.
+        
+        Args:
+            image: Input image
+            text_regions: Detected text regions
+            ocr_method: OCR method to use
+            
+        Returns:
+            Labels dict with title, xlabel, ylabel, legend, values
+        """
         labels = self.ocr.read_chart_labels(image, text_regions, ocr_method=ocr_method)
         
-        # Step 2.5: Nếu ylabel là None hoặc empty, thử extract riêng từ vùng trái
+        # Try to extract ylabel from left region if not found
         if not labels.get('ylabel') or labels.get('ylabel') == 'None' or labels.get('ylabel') == '':
             ylabel = self._extract_ylabel_from_left_region(image)
             if ylabel:
                 labels['ylabel'] = ylabel
         
-        # Step 3: Calculate values (cải thiện: sử dụng value labels và y-axis scale)
-        values = self._calculate_bar_values(bars, y_axis, image, labels)
+        return labels
+    
+    def _build_output(
+        self, 
+        labels: Dict[str, Any], 
+        bars: List[Dict[str, Any]], 
+        values: List[float], 
+        categories: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Build final structured output.
         
-        # Step 4: Match categories with bars (cải thiện: better matching logic)
-        categories = self._extract_categories(labels, bars, image.shape[1], image.shape[0])
-        
-        # Step 5: Create structured data
+        Args:
+            labels: Extracted labels
+            bars: Detected bars
+            values: Calculated bar values
+            categories: Extracted categories
+            
+        Returns:
+            Structured data dict
+        """
         structured_data = {
             'chart_type': 'bar_chart',
             'title': labels.get('title', 'Untitled'),
@@ -140,10 +194,63 @@ class BarChartExtractor:
         
         return structured_data
     
-    def _detect_y_axis_scale(self, image, y_axis, labels):
+    def extract(self, image_path: str, ocr_method: str = 'easyocr') -> Dict[str, Any]:
         """
-        Detect y-axis scale từ ticks và labels
-        Returns: (y_min, y_max, tick_positions, tick_values)
+        Main extraction pipeline.
+        
+        Args:
+            image_path: Path to chart image file
+            ocr_method: OCR engine to use ('easyocr' or 'tesseract')
+        
+        Returns:
+            Dict with chart_type, title, x_axis_label, y_axis_label, data
+        
+        Raises:
+            FileNotFoundError: If image file doesn't exist
+            ValueError: If ocr_method is invalid or image format unsupported
+            InvalidImageError: If image cannot be loaded
+        """
+        # Validate ocr_method
+        if ocr_method not in DEFAULT_LAYOUT.VALID_OCR_METHODS:
+            raise ValueError(
+                f"Invalid OCR method: {ocr_method}. "
+                f"Valid options: {', '.join(DEFAULT_LAYOUT.VALID_OCR_METHODS)}"
+            )
+        
+        # Step 1: Load and validate image
+        image = self._load_and_validate_image(image_path)
+        
+        # Step 2: Detect components
+        x_axis, y_axis, bars, text_regions = self._detect_components(image)
+        
+        # Step 3: Extract labels via OCR
+        labels = self._extract_labels(image, text_regions, ocr_method)
+        
+        # Step 4: Calculate values
+        values = self._calculate_bar_values(bars, y_axis, image, labels)
+        
+        # Step 5: Extract categories
+        categories = self._extract_categories(labels, bars, image.shape[1], image.shape[0])
+        
+        # Step 6: Build and return output
+        return self._build_output(labels, bars, values, categories)
+    
+    def _detect_y_axis_scale(
+        self, 
+        image: np.ndarray, 
+        y_axis: Optional[np.ndarray], 
+        labels: Dict[str, Any]
+    ) -> Tuple[float, float, List[int], List[float]]:
+        """
+        Detect y-axis scale from ticks and labels.
+        
+        Args:
+            image: Input image
+            y_axis: Detected y-axis line or None
+            labels: OCR labels dict
+            
+        Returns:
+            Tuple of (y_min, y_max, tick_positions, tick_values)
         """
         h, w = image.shape[:2]
         
@@ -153,8 +260,8 @@ class BarChartExtractor:
             x, y = val_info['position']
             text = val_info['text']
             
-            # Y-axis ticks ở bên trái (x < 0.2 * w)
-            if x < 0.2 * w and val_info.get('is_number', False):
+            # Y-axis ticks ở bên trái
+            if x < DEFAULT_LAYOUT.YTICK_REGION_MAX_X * w and val_info.get('is_number', False):
                 try:
                     tick_value = float(text.replace(',', '').replace('%', ''))
                     y_ticks.append({
@@ -166,7 +273,12 @@ class BarChartExtractor:
         
         if len(y_ticks) < 2:
             # Fallback: giả sử scale 0-100
-            return 0, 100, [0, h-50], [0, 100]
+            return (
+                DEFAULT_LAYOUT.FALLBACK_Y_MIN,
+                DEFAULT_LAYOUT.FALLBACK_Y_MAX,
+                [0, h - DEFAULT_LAYOUT.FALLBACK_BASELINE_OFFSET],
+                [DEFAULT_LAYOUT.FALLBACK_Y_MIN, DEFAULT_LAYOUT.FALLBACK_Y_MAX]
+            )
         
         # Sort theo y position (từ trên xuống - y nhỏ = trên cao)
         y_ticks.sort(key=lambda t: t['y_position'])
@@ -184,10 +296,22 @@ class BarChartExtractor:
         
         return y_min, y_max, tick_positions, tick_values
     
-    def _extract_bar_values_from_labels(self, bars, labels, image):
+    def _extract_bar_values_from_labels(
+        self, 
+        bars: List[Dict[str, Any]], 
+        labels: Dict[str, Any], 
+        image: np.ndarray
+    ) -> List[Optional[float]]:
         """
-        Extract values từ labels trên bars (nếu có)
-        CẢI THIỆN: Mở rộng vùng tìm kiếm và threshold linh hoạt hơn
+        Extract values from labels above bars.
+        
+        Args:
+            bars: List of detected bars
+            labels: OCR labels dict
+            image: Input image
+            
+        Returns:
+            List of values (None for bars without labels)
         """
         h, w = image.shape[:2]
         values = []
@@ -219,13 +343,13 @@ class BarChartExtractor:
                 )
                 
                 # Threshold linh hoạt hơn
-                if x_dist < 50 and y_dist < 80:  # Tăng từ 30, 50
-                    total_dist = x_dist + y_dist * 0.5  # Ưu tiên x distance
+                if x_dist < DEFAULT_LAYOUT.VALUE_X_THRESHOLD and y_dist < DEFAULT_LAYOUT.VALUE_Y_THRESHOLD:
+                    total_dist = x_dist + y_dist * DEFAULT_LAYOUT.VALUE_Y_WEIGHT
                     if total_dist < min_dist:
                         min_dist = total_dist
                         closest_label = label_info
             
-            if closest_label and min_dist < 60:  # Tăng từ 40
+            if closest_label and min_dist < DEFAULT_LAYOUT.VALUE_TOTAL_DIST_THRESHOLD:
                 # Parse value từ text
                 try:
                     value_text = closest_label['text'].replace(',', '').replace('%', '').strip()
@@ -240,9 +364,24 @@ class BarChartExtractor:
         
         return values
     
-    def _calculate_values_from_pixels(self, bars, y_axis, image, labels):
+    def _calculate_values_from_pixels(
+        self, 
+        bars: List[Dict[str, Any]], 
+        y_axis: Optional[np.ndarray], 
+        image: np.ndarray, 
+        labels: Dict[str, Any]
+    ) -> List[float]:
         """
-        Tính values từ pixel height với y-axis scale detection
+        Calculate bar values from pixel heights using y-axis scale.
+        
+        Args:
+            bars: List of detected bars
+            y_axis: Detected y-axis line or None
+            image: Input image
+            labels: OCR labels dict
+            
+        Returns:
+            List of calculated values
         """
         h, w = image.shape[:2]
         
@@ -253,20 +392,18 @@ class BarChartExtractor:
         
         # Xác định baseline (x-axis y position)
         if y_axis is None:
-            baseline_y = h - 50
+            baseline_y = h - DEFAULT_LAYOUT.FALLBACK_BASELINE_OFFSET
         else:
             baseline_y = y_axis[1]
         
         # Tạo mapping function: pixel y -> value
-        def pixel_to_value(pixel_y):
-            """
-            Convert pixel y position to actual value
-            """
+        def pixel_to_value(pixel_y: int) -> float:
+            """Convert pixel y position to actual value."""
             # Tìm 2 ticks gần nhất
             if len(tick_positions) < 2:
                 # Linear interpolation với min/max
                 value_range = y_max - y_min
-                pixel_range = baseline_y - tick_positions[0] if tick_positions else h - 50
+                pixel_range = baseline_y - tick_positions[0] if tick_positions else h - DEFAULT_LAYOUT.FALLBACK_BASELINE_OFFSET
                 ratio = (baseline_y - pixel_y) / pixel_range if pixel_range > 0 else 0
                 return y_min + ratio * value_range
             
@@ -306,9 +443,24 @@ class BarChartExtractor:
         
         return values
     
-    def _calculate_bar_values(self, bars, y_axis, image, labels):
+    def _calculate_bar_values(
+        self, 
+        bars: List[Dict[str, Any]], 
+        y_axis: Optional[np.ndarray], 
+        image: np.ndarray, 
+        labels: Dict[str, Any]
+    ) -> List[float]:
         """
-        Tính giá trị bars: ưu tiên value labels, fallback về pixel mapping
+        Calculate bar values: prioritize labels, fallback to pixel mapping.
+        
+        Args:
+            bars: List of detected bars
+            y_axis: Detected y-axis line or None
+            image: Input image
+            labels: OCR labels dict
+            
+        Returns:
+            List of bar values
         """
         # Bước 1: Thử extract từ value labels (chính xác nhất)
         values_from_labels = self._extract_bar_values_from_labels(bars, labels, image)
@@ -328,12 +480,25 @@ class BarChartExtractor:
         
         return final_values
     
-    def _extract_categories(self, labels, bars, img_width, img_height):
+    def _extract_categories(
+        self, 
+        labels: Dict[str, Any], 
+        bars: List[Dict[str, Any]], 
+        img_width: int, 
+        img_height: int
+    ) -> List[str]:
         """
-        Match category labels với bars - CẢI THIỆN với fuzzy matching
-        Filter ra các số và x-axis label, chỉ lấy text categories
+        Match category labels with bars using fuzzy matching.
+        
+        Args:
+            labels: OCR labels dict
+            bars: List of detected bars
+            img_width: Image width in pixels
+            img_height: Image height in pixels
+            
+        Returns:
+            List of category names
         """
-        from difflib import SequenceMatcher
         
         # Lấy tất cả texts ở vùng dưới (x-axis area)
         all_texts = labels.get('values', [])
@@ -346,10 +511,10 @@ class BarChartExtractor:
             x, y = text_info['position']
             text = text_info['text']
             
-            # Mở rộng vùng tìm kiếm (y > 0.6 * h)
+            # Mở rộng vùng tìm kiếm (categories ở phần dưới)
             # Không phải số (categories thường là text)
             # Không phải x-axis label
-            if (y > 0.6 * img_height and
+            if (y > DEFAULT_LAYOUT.CATEGORY_REGION_MIN_Y * img_height and
                 not text_info.get('is_number', False) and
                 text != xlabel and
                 len(text) > 0):
@@ -386,8 +551,8 @@ class BarChartExtractor:
             'student': 'Student', 'students': 'Students'
         }
         
-        def normalize_text(text):
-            """Normalize text để so sánh và sửa lỗi OCR"""
+        def normalize_text(text: str) -> str:
+            """Normalize text and fix common OCR errors."""
             text_lower = text.lower().strip()
             # Thử match với month patterns
             for pattern, correct in month_patterns.items():
@@ -415,7 +580,10 @@ class BarChartExtractor:
                 dist = abs(text_x - bar_center_x)
                 
                 # Dynamic threshold
-                threshold = max(40, img_width / (len(bars) * 2.5)) if len(bars) > 0 else 40
+                threshold = max(
+                    DEFAULT_LAYOUT.MIN_SPACING_THRESHOLD,
+                    img_width / (len(bars) * DEFAULT_LAYOUT.SPACING_FACTOR)
+                ) if len(bars) > 0 else DEFAULT_LAYOUT.MIN_SPACING_THRESHOLD
                 
                 if dist < threshold and dist < min_dist:
                     min_dist = dist

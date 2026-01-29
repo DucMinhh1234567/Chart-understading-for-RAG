@@ -1,25 +1,49 @@
 # src/extraction/ocr_engine.py
+"""OCR engine module for text extraction from images."""
+from typing import Dict, Any, List, Optional, Tuple, Union
+
+import cv2
 import easyocr
+import numpy as np
 import pytesseract
 from PIL import Image
-import numpy as np
+
+from ..config import DEFAULT_LAYOUT
+
 
 class OCREngine:
-    def __init__(self, languages=None, gpu=False):
+    """OCR engine supporting EasyOCR and Tesseract."""
+    
+    def __init__(self, languages: Optional[List[str]] = None, gpu: bool = False) -> None:
         """
-        Initialize OCR engines
+        Initialize OCR engines.
+        
+        Args:
+            languages: List of language codes (default: ['en', 'vi'])
+            gpu: Whether to use GPU acceleration
         """
         if languages is None:
             languages = ['en', 'vi']
-        # EasyOCR - tốt cho tiếng Việt
+        # EasyOCR - good for Vietnamese
         self.easyocr_reader = easyocr.Reader(languages, gpu=gpu)
         
         # Tesseract - backup
-        # Cần cài: sudo apt-get install tesseract-ocr tesseract-ocr-vie
+        # Install: sudo apt-get install tesseract-ocr tesseract-ocr-vie
     
-    def read_text_easyocr(self, image_region, confidence_threshold=0.5):
+    def read_text_easyocr(
+        self, 
+        image_region: np.ndarray, 
+        confidence_threshold: float = 0.5
+    ) -> List[Dict[str, Any]]:
         """
-        Đọc text từ image region bằng EasyOCR
+        Read text from image region using EasyOCR.
+        
+        Args:
+            image_region: Image region as numpy array
+            confidence_threshold: Minimum confidence threshold
+            
+        Returns:
+            List of dicts with 'text', 'confidence', 'bbox'
         """
         results = self.easyocr_reader.readtext(image_region)
         
@@ -35,9 +59,18 @@ class OCREngine:
         
         return texts
     
-    def read_text_tesseract(self, image_region):
+    def read_text_tesseract(
+        self, 
+        image_region: Union[np.ndarray, Image.Image]
+    ) -> List[Dict[str, Any]]:
         """
-        Đọc text bằng Tesseract
+        Read text using Tesseract OCR.
+        
+        Args:
+            image_region: Image region (numpy array or PIL Image)
+            
+        Returns:
+            List of dicts with 'text', 'confidence', 'bbox'
         """
         # Convert numpy array to PIL Image
         if isinstance(image_region, np.ndarray):
@@ -53,7 +86,7 @@ class OCREngine:
         results = []
         n_boxes = len(data['text'])
         for i in range(n_boxes):
-            if int(data['conf'][i]) > 50:  # Confidence threshold
+            if int(data['conf'][i]) > DEFAULT_LAYOUT.TESSERACT_CONFIDENCE:
                 text = data['text'][i].strip()
                 if text:
                     results.append({
@@ -65,19 +98,21 @@ class OCREngine:
         
         return results
     
-    def read_text_rotated(self, image_region, rotation_angles=None):
+    def read_text_rotated(
+        self, 
+        image_region: np.ndarray, 
+        rotation_angles: Optional[List[int]] = None
+    ) -> List[Dict[str, Any]]:
         """
-        Đọc text với nhiều góc rotation để bắt được text dọc (y-axis labels)
-        Thử nhiều góc xoay và chọn kết quả tốt nhất
+        Read text with multiple rotation angles to catch vertical text.
         
         Args:
-            image_region: Image region để OCR
-            rotation_angles: Danh sách các góc xoay (default: [0, 90, 270])
-        
+            image_region: Image region for OCR
+            rotation_angles: List of angles to try (default: [0, 90, 270])
+            
         Returns:
-            List of text results với confidence cao nhất
+            List with best result (highest confidence)
         """
-        import cv2
         
         if rotation_angles is None:
             rotation_angles = [0, 90, 270]
@@ -97,7 +132,7 @@ class OCREngine:
                 rotated = image_region
             
             # OCR on rotated image
-            texts = self.read_text_easyocr(rotated, confidence_threshold=0.2)
+            texts = self.read_text_easyocr(rotated, confidence_threshold=DEFAULT_LAYOUT.LOW_CONFIDENCE)
             
             if texts and texts[0]['confidence'] > best_confidence:
                 best_confidence = texts[0]['confidence']
@@ -105,27 +140,45 @@ class OCREngine:
         
         return [best_result] if best_result else []
     
-    def _is_number(self, text):
+    def _is_number(self, text: str) -> bool:
         """
-        Kiểm tra text có phải là số không
+        Check if text represents a number.
+        
+        Args:
+            text: Text to check
+            
+        Returns:
+            True if text is numeric, False otherwise
         """
-        # Loại bỏ dấu chấm, dấu phẩy, dấu trừ, dấu phần trăm
+        # Remove dots, commas, minus signs, percent signs
         cleaned = text.replace('.', '').replace(',', '').replace('-', '').replace('%', '').strip()
         
-        # Kiểm tra có phải số nguyên hoặc số thập phân
+        # Check for integer or decimal
         try:
             float(cleaned)
             return True
         except ValueError:
-            # Kiểm tra có phải số với đơn vị (ví dụ: "100%", "50k")
+            # Check for number with unit (e.g., "100%", "50k")
             if cleaned and cleaned[0].isdigit():
                 return True
             return False
     
-    def read_chart_labels(self, image, text_regions, ocr_method='easyocr'):
+    def read_chart_labels(
+        self, 
+        image: np.ndarray, 
+        text_regions: List[Tuple[int, int, int, int]], 
+        ocr_method: str = 'easyocr'
+    ) -> Dict[str, Any]:
         """
-        Đọc các labels trong biểu đồ với improved classification logic
-        Sử dụng heuristics để phân biệt title, labels và ticks
+        Read chart labels with improved classification logic.
+        
+        Args:
+            image: Input image as numpy array
+            text_regions: List of (x, y, width, height) tuples
+            ocr_method: OCR method to use ('easyocr' or 'tesseract')
+            
+        Returns:
+            Dict with 'title', 'xlabel', 'ylabel', 'legend', 'values'
         """
         labels = {
             'title': None,
@@ -145,14 +198,14 @@ class OCREngine:
             
             # CẢI THIỆN: Tính aspect ratio để detect rotated text (vertical text có height > width)
             aspect_ratio = box_h / box_w if box_w > 0 else 1.0
-            is_vertical = aspect_ratio > 1.5  # Text dọc nếu height > 1.5 * width
+            is_vertical = aspect_ratio > DEFAULT_LAYOUT.VERTICAL_ASPECT_RATIO
             
             # Nếu là vertical text, thử rotate để OCR tốt hơn
             if is_vertical:
                 texts = self.read_text_rotated(region, rotation_angles=[0, 90, 270])
             else:
                 # OCR với confidence threshold thấp hơn để bắt được nhiều text hơn
-                texts = self.read_text_easyocr(region, confidence_threshold=0.2)
+                texts = self.read_text_easyocr(region, confidence_threshold=DEFAULT_LAYOUT.LOW_CONFIDENCE)
             
             if not texts:
                 continue
@@ -175,10 +228,10 @@ class OCREngine:
         # Bước 2: Phân loại với heuristics (CẢI THIỆN)
         
         # ========== CẢI THIỆN TITLE EXTRACTION ==========
-        # Tìm tất cả texts ở vùng top (y < 0.3 * h)
+        # Tìm tất cả texts ở vùng top
         title_region_texts = [
             t for t in all_texts 
-            if t['position'][1] < 0.3 * h and not t['is_number']
+            if t['position'][1] < DEFAULT_LAYOUT.TITLE_REGION_MAX_Y * h and not t['is_number']
         ]
         
         if title_region_texts:
@@ -188,7 +241,8 @@ class OCREngine:
             
             for text_info in title_region_texts:
                 y_pos = text_info['position'][1]
-                y_line = round(y_pos / 20) * 20  # Round to nearest 20 pixels (same line)
+                # Round to nearest pixels (same line)
+                y_line = round(y_pos / DEFAULT_LAYOUT.LINE_GROUPING_TOLERANCE) * DEFAULT_LAYOUT.LINE_GROUPING_TOLERANCE
                 
                 if y_line not in title_lines:
                     title_lines[y_line] = []
@@ -227,16 +281,18 @@ class OCREngine:
         for t in all_texts:
             x_pos, y_pos = t['position']
             
-            # Vùng bên trái (x < 0.3 * w để bao gồm cả rotated text)
-            if (x_pos < 0.3 * w and 
-                y_pos < 0.85 * h and  # Mở rộng vùng tìm kiếm
-                y_pos > 0.15 * h and  # Không quá gần top
+            # Vùng bên trái (để bao gồm cả rotated text)
+            if (x_pos < DEFAULT_LAYOUT.YLABEL_REGION_MAX_X * w and 
+                y_pos < DEFAULT_LAYOUT.YLABEL_REGION_MAX_Y * h and
+                y_pos > DEFAULT_LAYOUT.YLABEL_REGION_MIN_Y * h and
                 not t['is_number'] and
-                t['length'] > 0):  # Cho phép cả text 1 ký tự
+                t['length'] > 0):
             
                 # CẢI THIỆN: Ưu tiên text dọc (rotated 90°) - đây là y-axis label
-                # Y-axis label thường có height > width (aspect_ratio > 1.5)
-                is_vertical_text = t.get('is_vertical', False) or t.get('aspect_ratio', 1.0) > 1.5
+                is_vertical_text = (
+                    t.get('is_vertical', False) or 
+                    t.get('aspect_ratio', 1.0) > DEFAULT_LAYOUT.VERTICAL_ASPECT_RATIO
+                )
                 
                 # Tính điểm ưu tiên
                 priority_score = 0
@@ -248,12 +304,12 @@ class OCREngine:
                 # Ưu tiên text dài (y-label thường là từ hoặc cụm từ)
                 priority_score += min(t['length'] * 10, 50)
                 
-                # Ưu tiên text ở giữa chiều cao chart (0.3h - 0.6h)
-                y_center_score = 1.0 / (abs(y_pos - 0.45 * h) + 1)
+                # Ưu tiên text ở giữa chiều cao chart
+                y_center_score = 1.0 / (abs(y_pos - DEFAULT_LAYOUT.YLABEL_CENTER_Y * h) + 1)
                 priority_score += y_center_score * 20
                 
                 # Ưu tiên text không quá gần top (không phải title)
-                if y_pos > 0.25 * h:
+                if y_pos > DEFAULT_LAYOUT.YLABEL_NOT_TITLE_MIN_Y * h:
                     priority_score += 10
                 
                 ylabel_candidates.append({
@@ -271,14 +327,14 @@ class OCREngine:
             best_ylabel = best_candidate['text_info']
             
             # Kiểm tra thêm: không phải là category label (thường ở dưới)
-            if best_ylabel['position'][1] < 0.75 * h:
+            if best_ylabel['position'][1] < DEFAULT_LAYOUT.YLABEL_NOT_CATEGORY_MAX_Y * h:
                 labels['ylabel'] = best_ylabel['text']
         
         # X-AXIS LABEL: Text ở bottom, không phải số, không phải category
         xlabel_candidates = [
             t for t in all_texts
-            if (t['position'][1] > 0.85 * h and
-                t['position'][0] > 0.3 * w and
+            if (t['position'][1] > DEFAULT_LAYOUT.XLABEL_REGION_MIN_Y * h and
+                t['position'][0] > DEFAULT_LAYOUT.XLABEL_REGION_MIN_X * w and
                 not t['is_number'] and
                 t['length'] > 1)
         ]
@@ -286,7 +342,7 @@ class OCREngine:
             # Chọn text dài nhất, ưu tiên text ở giữa chiều rộng
             xlabel_candidates.sort(key=lambda t: (
                 -t['length'],
-                abs(t['position'][0] - 0.5 * w)
+                abs(t['position'][0] - 0.5 * w)  # 0.5 for center is fine
             ))
             labels['xlabel'] = xlabel_candidates[0]['text']
         

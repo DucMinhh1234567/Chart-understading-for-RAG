@@ -1216,25 +1216,25 @@ Hooks:
 ## ✅ CHECKLIST THEO DÕI TIẾN ĐỘ
 
 ### Phase 0: Emergency Fixes
-- [ ] Task 0.1: Sửa README.md
-- [ ] Task 0.2: Implement main.py
-- [ ] Task 0.3: Fix/xóa demo script broken
-- [ ] Task 0.4: Clean requirements.txt
+- [V] Task 0.1: Sửa README.md
+- [V] Task 0.2: Implement main.py
+- [V] Task 0.3: Fix/xóa demo script broken
+- [V] Task 0.4: Clean requirements.txt
 
 ### Phase 1: Foundation
-- [ ] Task 1.1: Tạo cấu trúc tests
-- [ ] Task 1.2: Viết conftest.py
-- [ ] Task 1.3: Tests cho validators
-- [ ] Task 1.4: Tests cho chart_detector
-- [ ] Task 1.5: Input validation cho bar_extractor
-- [ ] Task 1.6: Fix mutable default arguments
-- [ ] Task 1.7: Add pytest.ini
+- [V] Task 1.1: Tạo cấu trúc tests
+- [V] Task 1.2: Viết conftest.py
+- [V] Task 1.3: Tests cho validators
+- [V] Task 1.4: Tests cho chart_detector
+- [V] Task 1.5: Input validation cho bar_extractor
+- [V] Task 1.6: Fix mutable default arguments
+- [V] Task 1.7: Add pytest.ini
 
 ### Phase 2: Code Quality
-- [ ] Task 2.1: Tạo dataclasses
-- [ ] Task 2.2: Extract magic numbers
-- [ ] Task 2.3: Refactor bar_extractor
-- [ ] Task 2.4: Add type hints
+- [V] Task 2.1: Tạo dataclasses
+- [V] Task 2.2: Extract magic numbers
+- [V] Task 2.3: Refactor bar_extractor
+- [V] Task 2.4: Add type hints
 
 ### Phase 3: Engineering
 - [ ] Task 3.1: GitHub Actions CI
