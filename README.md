@@ -2,15 +2,24 @@
 
 ## Mô tả Project
 
-Project "chart-understanding" là một hệ thống nhận dạng và mô tả biểu đồ tự động, có khả năng phân tích các loại biểu đồ phổ biến (bar chart, line chart, pie chart) và chuyển đổi chúng thành dữ liệu text và JSON. Project sử dụng hybrid approach kết hợp rule-based computer vision algorithms và machine learning models để đạt độ chính xác cao.
+Project "chart-understanding" là một hệ thống trích xuất dữ liệu từ biểu đồ cột (bar chart) tự động. Project sử dụng rule-based computer vision + OCR approach để phát hiện các thành phần biểu đồ và đọc text/giá trị.
+
+**Trạng thái hiện tại:** Chỉ hỗ trợ **vertical bar chart**. Line chart và pie chart đang được phát triển.
 
 ## Tính năng
 
-- Nhận dạng và phân loại biểu đồ (bar chart, line chart, pie chart)
-- Trích xuất dữ liệu từ biểu đồ
-- Chuyển đổi dữ liệu thành định dạng text và JSON
-- Sử dụng OCR để đọc nhãn và giá trị trên biểu đồ
-- Hybrid approach: kết hợp rule-based và ML models
+- Trích xuất dữ liệu từ bar chart (vertical)
+- Phát hiện trục X, Y và các thanh (bars)
+- Sử dụng OCR (EasyOCR/Tesseract) để đọc nhãn và giá trị
+- Xuất dữ liệu dạng JSON
+- Validation pipeline để lọc false positives
+
+## Limitations
+
+- Chỉ hỗ trợ vertical bar chart
+- Chưa hỗ trợ: line chart, pie chart, stacked bar, horizontal bar
+- Chưa có ML-based chart classifier
+- Độ chính xác phụ thuộc vào chất lượng ảnh và độ rõ của text
 
 ## Hướng dẫn cài đặt
 
@@ -46,15 +55,43 @@ brew install tesseract
 ### Chạy chương trình chính
 
 ```bash
-python main.py
+# Cơ bản - in kết quả ra stdout
+python main.py <đường_dẫn_ảnh>
+
+# Ví dụ
+python main.py data/raw/bar_charts/chart_0001.png
+
+# Lưu kết quả vào file JSON
+python main.py chart.png -o result.json
+
+# Sử dụng Tesseract thay vì EasyOCR
+python main.py chart.png --ocr tesseract
+```
+
+### Output mẫu
+
+```json
+{
+  "chart_type": "bar_chart",
+  "title": "Monthly Sales",
+  "x_axis_label": "Months",
+  "y_axis_label": "Sales ($)",
+  "data": [
+    {"category": "Jan", "value": 45.5},
+    {"category": "Feb", "value": 62.3},
+    {"category": "Mar", "value": 78.1}
+  ]
+}
 ```
 
 ### Sử dụng các module riêng lẻ
 
 ```python
-from src.preprocessing import chart_detector
-from src.extraction import bar_extractor, line_extractor
-from src.models import classifier, text_generator
+from src.extraction.bar_extractor import BarChartExtractor
+
+extractor = BarChartExtractor()
+result = extractor.extract("chart.png", ocr_method="easyocr")
+print(result)
 ```
 
 ## Kiến trúc hệ thống
@@ -63,66 +100,50 @@ from src.models import classifier, text_generator
 chart-understanding/
 ├── data/
 │   ├── raw/
-│   │   ├── bar_charts/
-│   │   ├── line_charts/
-│   │   └── pie_charts/
-│   ├── processed/
+│   │   └── bar_charts/
 │   └── annotations/
 ├── src/
 │   ├── preprocessing/
-│   │   ├── __init__.py
-│   │   ├── image_utils.py
-│   │   └── chart_detector.py
+│   │   ├── image_utils.py      # Tiền xử lý ảnh
+│   │   ├── chart_detector.py   # Phát hiện axes, bars
+│   │   ├── detector_config.py  # Adaptive configuration
+│   │   └── bar_validators.py   # Validation pipeline
 │   ├── extraction/
-│   │   ├── __init__.py
-│   │   ├── bar_extractor.py
-│   │   ├── line_extractor.py
-│   │   └── ocr_engine.py
-│   ├── models/
-│   │   ├── __init__.py
-│   │   ├── classifier.py
-│   │   └── text_generator.py
-│   ├── text_generation/
-│   │   ├── __init__.py
-│   │   └── template_generator.py
+│   │   ├── bar_extractor.py    # Main extraction logic
+│   │   └── ocr_engine.py       # EasyOCR + Tesseract
 │   └── utils/
-│       ├── __init__.py
 │       └── visualization.py
-├── notebooks/
-├── tests/
-├── models/
-├── config/
+├── notebooks/                   # Demo notebooks
 ├── scripts/
-│   ├── generate_dataset.py
-│   └── train_classifier.py
-├── main.py
-├── requirements.txt
-├── README.md
-└── .gitignore
+│   └── generate_dataset.py     # Tạo synthetic dataset
+├── main.py                      # CLI entry point
+└── requirements.txt
 ```
 
 ### Luồng xử lý
 
-1. **Preprocessing**: Nhận ảnh đầu vào → Tiền xử lý → Phát hiện biểu đồ
-2. **Classification**: Phân loại loại biểu đồ (bar/line/pie)
-3. **Extraction**: Trích xuất dữ liệu dựa trên loại biểu đồ
-4. **OCR**: Đọc nhãn và giá trị từ biểu đồ
-5. **Text Generation**: Tạo mô tả text và JSON từ dữ liệu đã trích xuất
+1. **Input**: Ảnh bar chart (PNG/JPG)
+2. **Preprocessing**: Load ảnh → Enhance contrast → Detect edges
+3. **Detection**: Phát hiện trục X, Y → Phát hiện bars → Validation
+4. **OCR**: Đọc title, labels, values
+5. **Output**: Structured JSON data
 
 ## Roadmap phát triển
 
-### Phase 1: Foundation (Hiện tại)
-- Thiết lập cấu trúc project
-- Implement preprocessing module
-- Implement chart detector
-- Implement basic extraction cho từng loại biểu đồ
+### Đã hoàn thành
+- Preprocessing module
+- Bar chart detector với adaptive thresholds
+- Validation pipeline (Width, Area, Spacing validators)
+- OCR integration (EasyOCR + Tesseract)
+- CLI interface
 
-### Phase 2: ML Integration
-- Train và tích hợp chart classifier
-- Implement OCR engine với EasyOCR/Pytesseract
-- Tích hợp text generation models
+### Đang phát triển
+- Line chart extractor
+- Cải thiện độ chính xác OCR
+- Unit tests
 
-### Phase 3: Enhancement
-- Cải thiện độ chính xác extraction
-- Hỗ trợ thêm các loại biểu đồ (scatter, area, etc.)
-- Tối ưu hóa performance
+### Kế hoạch tương lai
+- Pie chart extractor
+- ML-based chart classifier
+- REST API
+- Horizontal bar chart support

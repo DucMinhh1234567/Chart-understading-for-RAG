@@ -55,11 +55,49 @@ class BarChartExtractor:
     
     def extract(self, image_path, ocr_method='easyocr'):
         """
-        Main extraction pipeline
-        Returns structured data
+        Main extraction pipeline.
+        
+        Args:
+            image_path: Path to chart image file
+            ocr_method: OCR engine to use ('easyocr' or 'tesseract')
+        
+        Returns:
+            Dict with chart_type, title, x_axis_label, y_axis_label, data
+        
+        Raises:
+            FileNotFoundError: If image file doesn't exist
+            ValueError: If ocr_method is invalid or image format unsupported
+            InvalidImageError: If image cannot be loaded
         """
-        # Load image
-        image = cv2.imread(image_path)
+        from pathlib import Path
+        from ..preprocessing.detector_config import InvalidImageError
+        
+        # Validate file exists
+        path = Path(image_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Image not found: {image_path}")
+        
+        # Validate image format
+        supported_formats = ['.png', '.jpg', '.jpeg', '.bmp', '.tiff']
+        if path.suffix.lower() not in supported_formats:
+            raise ValueError(
+                f"Unsupported image format: {path.suffix}. "
+                f"Supported: {', '.join(supported_formats)}"
+            )
+        
+        # Validate ocr_method
+        valid_ocr_methods = ['easyocr', 'tesseract']
+        if ocr_method not in valid_ocr_methods:
+            raise ValueError(
+                f"Invalid OCR method: {ocr_method}. "
+                f"Valid options: {', '.join(valid_ocr_methods)}"
+            )
+        
+        # Load image with error handling
+        image = cv2.imread(str(image_path))
+        if image is None:
+            raise InvalidImageError(f"Failed to load image: {image_path}")
+        
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         
         # Step 1: Detect components

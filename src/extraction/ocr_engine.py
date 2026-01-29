@@ -65,19 +65,22 @@ class OCREngine:
         
         return results
     
-    def read_text_rotated(self, image_region, rotation_angles=[0, 90, 270]):
+    def read_text_rotated(self, image_region, rotation_angles=None):
         """
         Đọc text với nhiều góc rotation để bắt được text dọc (y-axis labels)
         Thử nhiều góc xoay và chọn kết quả tốt nhất
         
         Args:
             image_region: Image region để OCR
-            rotation_angles: Danh sách các góc xoay (0, 90, 270)
+            rotation_angles: Danh sách các góc xoay (default: [0, 90, 270])
         
         Returns:
             List of text results với confidence cao nhất
         """
         import cv2
+        
+        if rotation_angles is None:
+            rotation_angles = [0, 90, 270]
         
         best_result = None
         best_confidence = 0

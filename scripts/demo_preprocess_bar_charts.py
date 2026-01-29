@@ -73,14 +73,9 @@ def main() -> None:
     for idx, img_path in enumerate(image_paths, start=1):
         print(f"[{idx:02d}] Processing {img_path.name}...")
 
-        # Option 1: Sử dụng pipeline cải tiến với blur nhẹ hơn (3x3 thay vì 5x5)
+        # 1) Chạy pipeline tiền xử lý: load -> remove_noise -> enhance_contrast
         try:
-            enhanced = preprocessor.preprocess_pipeline(
-                str(img_path),
-                blur_ksize=(3, 3),  # Giảm blur để giữ chi tiết
-                apply_blur=True,
-                normalize=False,  # Không resize để giữ nguyên kích thước gốc
-            )
+            enhanced = preprocessor.preprocess_pipeline(str(img_path))
         except Exception as exc:  # noqa: BLE001
             print(f"  Lỗi khi xử lý {img_path.name}: {exc}")
             continue
@@ -100,28 +95,24 @@ def main() -> None:
         except Exception as exc:  # noqa: BLE001
             print(f"  -> Lỗi khi tạo binary image: {exc}")
 
-        # 4) Tạo và lưu ảnh biên với adaptive Canny (tốt hơn fixed threshold)
+        # 4) Tạo và lưu ảnh biên với Canny edge detection
         try:
-            edges_adaptive = preprocessor.detect_edges_adaptive(enhanced)
+            edges = preprocessor.detect_edges(enhanced)
             edges_path = temp_dir / f"edges_{img_path.name}"
-            cv2.imwrite(str(edges_path), edges_adaptive)
-            print(f"  -> Saved edges image (adaptive): {edges_path.name}")
+            cv2.imwrite(str(edges_path), edges)
+            print(f"  -> Saved edges image: {edges_path.name}")
         except Exception as exc:  # noqa: BLE001
             print(f"  -> Lỗi khi tạo edges image: {exc}")
 
     print("\n" + "=" * 60)
     print("Hoàn thành demo tiền xử lý 10 ảnh bar chart đầu tiên.")
     print(f"\nĐã tạo các file trong thư mục: {temp_dir}")
-    print("  - preprocessed_*.png: Ảnh RGB đã qua tiền xử lý (blur 3x3 + CLAHE)")
+    print("  - preprocessed_*.png: Ảnh RGB đã qua tiền xử lý (blur 5x5 + CLAHE)")
     print("  - binary_*.png: Ảnh nhị phân (Otsu thresholding)")
-    print("  - edges_*.png: Ảnh biên (Adaptive Canny edge detection)")
-    print("\nCải tiến so với trước:")
-    print("  ✓ Blur kernel giảm từ 5x5 → 3x3 (giữ chi tiết tốt hơn)")
-    print("  ✓ Canny edge detection dùng adaptive threshold (tự động điều chỉnh)")
+    print("  - edges_*.png: Ảnh biên (Canny edge detection)")
     print("\nMở các file này để so sánh và thấy rõ hiệu quả tiền xử lý!")
     print("=" * 60)
 
 
 if __name__ == "__main__":
     main()
-
