@@ -1,0 +1,42 @@
+# Pre-commit hooks configuration
+# Install: pre-commit install
+# Run all: pre-commit run --all-files
+
+repos:
+  # Standard pre-commit hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: ^(notebooks/|data/)
+      - id: end-of-file-fixer
+        exclude: ^(notebooks/|data/)
+      - id: check-yaml
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: check-json
+      - id: check-merge-conflict
+
+  # Ruff - Fast Python linter and formatter
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.1.9
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+        exclude: ^(notebooks/|data/)
+      - id: ruff-format
+        exclude: ^(notebooks/|data/)
+
+  # MyPy - Static type checker
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.8.0
+    hooks:
+      - id: mypy
+        additional_dependencies:
+          - numpy
+          - types-Pillow
+        args:
+          - --ignore-missing-imports
+          - --no-strict-optional
+        exclude: ^(notebooks/|tests/|scripts/)
+        files: ^src/

@@ -1237,9 +1237,9 @@ Hooks:
 - [V] Task 2.4: Add type hints
 
 ### Phase 3: Engineering
-- [ ] Task 3.1: GitHub Actions CI
-- [ ] Task 3.2: Benchmarking script
-- [ ] Task 3.3: Pre-commit hooks
+- [V] Task 3.1: GitHub Actions CI
+- [V] Task 3.2: Benchmarking script
+- [V] Task 3.3: Pre-commit hooks
 
 ### Phase 4: Optional Features
 - [ ] Task 4.1: Line chart extractor
