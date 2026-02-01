@@ -7,4 +7,3 @@ __all__ = [
     "image_utils",
     "chart_detector",
 ]
-

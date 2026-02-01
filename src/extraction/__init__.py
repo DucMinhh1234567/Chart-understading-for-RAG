@@ -8,4 +8,3 @@ __all__ = [
     "line_extractor",
     "ocr_engine",
 ]
-

@@ -3,6 +3,7 @@
 This package contains ML model wrappers (classifier, text generator, etc.)
 and data types for structured data representation.
 """
+
 from .data_types import (
     BoundingBox,
     Bar,
