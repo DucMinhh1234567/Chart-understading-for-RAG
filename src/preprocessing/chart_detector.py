@@ -16,7 +16,6 @@ from .detector_config import (
     ChartDetectorConfig,
     ChartDetectionError,
     InvalidImageError,
-    AxisDetectionError,
     BarDetectionError
 )
 from .bar_validators import (

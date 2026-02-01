@@ -21,13 +21,13 @@ class ImagePreprocessor:
     def enhance_contrast(self, image):
         """Tăng contrast"""
         lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB)
-        l, a, b = cv2.split(lab)
+        l_channel, a, b = cv2.split(lab)
         
         # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
         clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-        l = clahe.apply(l)
+        l_channel = clahe.apply(l_channel)
         
-        enhanced = cv2.merge([l, a, b])
+        enhanced = cv2.merge([l_channel, a, b])
         enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2RGB)
         return enhanced
     
@@ -64,12 +64,12 @@ class ImagePreprocessor:
         """
         # 1. Tăng contrast với CLAHE
         lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB)
-        l, a, b = cv2.split(lab)
+        l_channel, a, b = cv2.split(lab)
         
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        l = clahe.apply(l)
+        l_channel = clahe.apply(l_channel)
         
-        enhanced = cv2.merge([l, a, b])
+        enhanced = cv2.merge([l_channel, a, b])
         enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2RGB)
         
         # 2. Denoise để giảm noise
